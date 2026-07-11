@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleExecutable</key>
+	<string>Kaze</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.garnetcs.kaze</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>Kaze</string>
+	<key>CFBundleDisplayName</key>
+	<string>Kaze</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.11.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>15.0</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.productivity</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Kaze records microphone audio so it can be transcribed and searched in your timeline.</string>
+	<key>NSScreenCaptureUsageDescription</key>
+	<string>Kaze periodically captures your screen to build a searchable visual timeline of your activity.</string>
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>Kaze records system audio so it can be transcribed and searched in your timeline.</string>
+	<key>NSHumanReadableCopyright</key>
+	<string>Copyright © 2024 alikia2x. GPL 3.0.</string>
+</dict>
+</plist>

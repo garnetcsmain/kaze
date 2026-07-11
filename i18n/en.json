@@ -1,0 +1,56 @@
+{
+	"settings": {
+		"title": "Settings",
+		"about": "About",
+		"screen": "Screen",
+		"screen-recording": "Screen Recording",
+		"version": "Version {version}",
+		"copyright": "Copyright © 2024 alikia2x",
+		"note": "Kaze is an open source software licensed under <1>GPL 3.0</1>, <3></3>and its source code is avaliable at <5>GitHub</5>.",
+		"environment-details": "Environment Info",
+		"node-version": "Node.js Version",
+		"electron-version": "Electron Version",
+		"chrome-version": "Chrome Version",
+		"os-version": "OS Version",
+		"os": "Operating System"
+	},
+	"tray": {
+		"showMainWindow": "Search",
+		"showSettingsWindow": "Settings",
+		"showLibrary": "Library",
+		"stopScreenRecording": "Stop Screen Recording",
+		"startScreenRecording": "Start Screen Recording",
+		"stopAudioRecording": "Stop Audio Recording",
+		"startAudioRecording": "Start Audio Recording",
+		"quit": "Quit"
+	},
+	"library": {
+		"title": "Library",
+		"storage-overview": "Storage Overview",
+		"total-storage": "Total",
+		"screen-recordings": "Screen Recordings",
+		"audio-recordings": "Audio Recordings",
+		"database": "Database",
+		"open-in-finder": "Show in Finder",
+		"files": "{count} files",
+		"file-singular": "1 file",
+		"no-files": "No files",
+		"retention-note": "Files older than 14 days are automatically deleted",
+		"transcriptions": "Transcriptions",
+		"no-transcriptions": "No transcriptions yet",
+		"transcriptions-count": "{count} transcriptions",
+		"copy-all": "Copy all transcriptions",
+		"status-encoding": "Encoding video",
+		"status-frames-waiting": "{count} screenshots queued for encoding",
+		"status-transcribing": "Transcribing audio",
+		"status-audio-waiting": "{count} audio clips queued for transcription"
+	},
+	"rewind": {
+		"search-placeholder": "Search screenshots and transcriptions...",
+		"results": "{count} results",
+		"result-singular": "1 result",
+		"no-results": "No results",
+		"transcriptions": "Transcriptions",
+		"loading": "Loading..."
+	}
+}

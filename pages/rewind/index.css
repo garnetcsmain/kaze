@@ -1,0 +1,133 @@
+body {
+	margin: 0;
+}
+
+/* ── Rewind Glass Materials ──────────────────────── */
+/* Dark glass — always dark since it overlays screenshots on black bg */
+
+.rewind-glass-bar {
+	background: rgba(0, 0, 0, 0.45);
+	backdrop-filter: blur(30px) saturate(180%);
+	-webkit-backdrop-filter: blur(30px) saturate(180%);
+	border: 1px solid rgba(255, 255, 255, 0.12);
+	box-shadow:
+		0 -1px 20px rgba(0, 0, 0, 0.3),
+		inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+.rewind-glass-input {
+	background: rgba(0, 0, 0, 0.50);
+	backdrop-filter: blur(30px) saturate(180%);
+	-webkit-backdrop-filter: blur(30px) saturate(180%);
+	border: 1px solid rgba(255, 255, 255, 0.12);
+	box-shadow:
+		0 4px 24px rgba(0, 0, 0, 0.3),
+		inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+.rewind-glass-panel {
+	background: rgba(0, 0, 0, 0.50);
+	backdrop-filter: blur(30px) saturate(180%);
+	-webkit-backdrop-filter: blur(30px) saturate(180%);
+	border: 1px solid rgba(255, 255, 255, 0.10);
+	box-shadow:
+		0 4px 24px rgba(0, 0, 0, 0.3),
+		inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+/* ── Light mode — slightly more transparent for bright screenshots ── */
+
+@media (prefers-color-scheme: light) {
+	.rewind-glass-bar {
+		background: rgba(255, 255, 255, 0.30);
+		border: 1px solid rgba(255, 255, 255, 0.60);
+		box-shadow:
+			0 -1px 20px rgba(0, 0, 0, 0.1),
+			inset 0 1px 0 rgba(255, 255, 255, 0.8);
+	}
+
+	.rewind-glass-input {
+		background: rgba(255, 255, 255, 0.40);
+		border: 1px solid rgba(255, 255, 255, 0.60);
+		box-shadow:
+			0 4px 24px rgba(0, 0, 0, 0.1),
+			inset 0 1px 0 rgba(255, 255, 255, 0.8);
+	}
+
+	.rewind-glass-panel {
+		background: rgba(255, 255, 255, 0.35);
+		border: 1px solid rgba(255, 255, 255, 0.50);
+		box-shadow:
+			0 4px 24px rgba(0, 0, 0, 0.1),
+			inset 0 1px 0 rgba(255, 255, 255, 0.7);
+	}
+}
+
+/* ── Loading Spinner ─────────────────────────────── */
+
+.rewind-spinner {
+	width: 24px;
+	height: 24px;
+	border: 2px solid rgba(255, 255, 255, 0.15);
+	border-top-color: rgba(255, 255, 255, 0.6);
+	border-radius: 50%;
+	animation: rewind-spin 0.6s linear infinite;
+}
+
+.rewind-spinner-sm {
+	width: 14px;
+	height: 14px;
+	border: 1.5px solid rgba(255, 255, 255, 0.15);
+	border-top-color: rgba(255, 255, 255, 0.5);
+	border-radius: 50%;
+	animation: rewind-spin 0.6s linear infinite;
+}
+
+@keyframes rewind-spin {
+	to {
+		transform: rotate(360deg);
+	}
+}
+
+/* ── Search Result Highlights ────────────────────── */
+
+mark {
+	background: rgba(255, 214, 0, 0.35);
+	color: inherit;
+	border-radius: 2px;
+	padding: 0 1px;
+}
+
+/* ── Line Clamp ──────────────────────────────────── */
+
+.rewind-line-clamp-2 {
+	display: -webkit-box;
+	-webkit-line-clamp: 2;
+	-webkit-box-orient: vertical;
+	overflow: hidden;
+}
+
+/* ── Scrollbar ───────────────────────────────────── */
+
+.rewind-scrollbar::-webkit-scrollbar {
+	width: 4px;
+}
+
+.rewind-scrollbar::-webkit-scrollbar-track {
+	background: transparent;
+}
+
+.rewind-scrollbar::-webkit-scrollbar-thumb {
+	background: rgba(255, 255, 255, 0.15);
+	border-radius: 2px;
+}
+
+.rewind-scrollbar::-webkit-scrollbar-thumb:hover {
+	background: rgba(255, 255, 255, 0.25);
+}
+
+/* ── Title Bar Drag Region ──────────────────────── */
+
+.rewind-titlebar-drag {
+	-webkit-app-region: drag;
+}

@@ -1,0 +1,19 @@
+# macOS
+.DS_Store
+
+# Node / Electron build output
+node_modules/
+dist/
+
+# Swift Package Manager build + bundled app output
+macos/.build/
+macos/dist/
+
+# Logs & local state
+*.log
+.env
+.env.*
+
+# Editors
+.idea/
+.vscode/

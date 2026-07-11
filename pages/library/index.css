@@ -1,0 +1,147 @@
+#root {
+	overflow: hidden;
+	user-select: none;
+}
+
+#library-scroll-container::-webkit-scrollbar {
+	display: none;
+}
+
+#library-scroll-container {
+	scrollbar-width: none;
+}
+
+/* ── Background ─────────────────────────────────── */
+
+.library-bg {
+	background:
+		radial-gradient(ellipse at 20% 50%, rgba(56, 189, 248, 0.08) 0%, transparent 50%),
+		radial-gradient(ellipse at 80% 20%, rgba(168, 85, 247, 0.06) 0%, transparent 50%),
+		radial-gradient(ellipse at 50% 80%, rgba(34, 197, 94, 0.05) 0%, transparent 50%);
+}
+
+@media (prefers-color-scheme: dark) {
+	.library-bg {
+		background:
+			radial-gradient(ellipse at 20% 50%, rgba(56, 189, 248, 0.04) 0%, transparent 50%),
+			radial-gradient(ellipse at 80% 20%, rgba(168, 85, 247, 0.03) 0%, transparent 50%),
+			radial-gradient(ellipse at 50% 80%, rgba(34, 197, 94, 0.02) 0%, transparent 50%);
+	}
+}
+
+/* ── Glass Material ─────────────────────────────── */
+
+.glass {
+	background: rgba(255, 255, 255, 0.55);
+	backdrop-filter: blur(20px) saturate(180%);
+	-webkit-backdrop-filter: blur(20px) saturate(180%);
+	border: 1px solid rgba(255, 255, 255, 0.6);
+	box-shadow:
+		0 1px 3px rgba(0, 0, 0, 0.04),
+		0 4px 16px rgba(0, 0, 0, 0.04),
+		inset 0 1px 0 rgba(255, 255, 255, 0.8);
+}
+
+@media (prefers-color-scheme: dark) {
+	.glass {
+		background: rgba(255, 255, 255, 0.06);
+		border: 1px solid rgba(255, 255, 255, 0.08);
+		box-shadow:
+			0 1px 3px rgba(0, 0, 0, 0.2),
+			0 4px 16px rgba(0, 0, 0, 0.15),
+			inset 0 1px 0 rgba(255, 255, 255, 0.05);
+	}
+}
+
+/* ── Glass Title Bar ────────────────────────────── */
+
+.glass-titlebar {
+	background: rgba(255, 255, 255, 0.72);
+	backdrop-filter: blur(30px) saturate(200%);
+	-webkit-backdrop-filter: blur(30px) saturate(200%);
+	border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+}
+
+@media (prefers-color-scheme: dark) {
+	.glass-titlebar {
+		background: rgba(30, 30, 30, 0.72);
+		border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+	}
+}
+
+/* ── Glass Rows ─────────────────────────────────── */
+
+.glass-row {
+	transition: background-color 0.15s ease;
+}
+
+.glass-row:hover {
+	background: rgba(0, 0, 0, 0.03);
+}
+
+@media (prefers-color-scheme: dark) {
+	.glass-row:hover {
+		background: rgba(255, 255, 255, 0.04);
+	}
+}
+
+/* ── Glass Button ───────────────────────────────── */
+
+.glass-btn {
+	background: rgba(0, 0, 0, 0.04);
+	backdrop-filter: blur(8px);
+	-webkit-backdrop-filter: blur(8px);
+	border: 1px solid rgba(0, 0, 0, 0.06);
+	transition: all 0.15s ease;
+}
+
+.glass-btn:hover {
+	background: rgba(0, 0, 0, 0.07);
+	border-color: rgba(0, 0, 0, 0.1);
+}
+
+@media (prefers-color-scheme: dark) {
+	.glass-btn {
+		background: rgba(255, 255, 255, 0.06);
+		border: 1px solid rgba(255, 255, 255, 0.08);
+	}
+	.glass-btn:hover {
+		background: rgba(255, 255, 255, 0.1);
+		border-color: rgba(255, 255, 255, 0.12);
+	}
+}
+
+/* ── Storage Bar ────────────────────────────────── */
+
+.storage-bar {
+	background: rgba(0, 0, 0, 0.04);
+	overflow: hidden;
+}
+
+@media (prefers-color-scheme: dark) {
+	.storage-bar {
+		background: rgba(255, 255, 255, 0.06);
+	}
+}
+
+/* ── Line clamp ─────────────────────────────────── */
+
+.line-clamp-2 {
+	display: -webkit-box;
+	-webkit-line-clamp: 2;
+	-webkit-box-orient: vertical;
+	overflow: hidden;
+}
+
+/* ── Separator ──────────────────────────────────── */
+
+.glass-separator {
+	height: 1px;
+	background: rgba(0, 0, 0, 0.06);
+}
+
+@media (prefers-color-scheme: dark) {
+	.glass-separator {
+		background: rgba(255, 255, 255, 0.06);
+	}
+}

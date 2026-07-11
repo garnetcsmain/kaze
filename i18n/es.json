@@ -1,0 +1,42 @@
+{
+	"settings": "Ajustes",
+	"tray": {
+		"quit": "Salir",
+		"showMainWindow": "Buscar",
+		"showSettingsWindow": "Ajustes",
+		"showLibrary": "Biblioteca",
+		"stopScreenRecording": "Detener Grabación de Pantalla",
+		"startScreenRecording": "Iniciar Grabación de Pantalla",
+		"stopAudioRecording": "Detener Grabación de Audio",
+		"startAudioRecording": "Iniciar Grabación de Audio"
+	},
+	"library": {
+		"title": "Biblioteca",
+		"storage-overview": "Resumen de Almacenamiento",
+		"total-storage": "Total",
+		"screen-recordings": "Grabaciones de Pantalla",
+		"audio-recordings": "Grabaciones de Audio",
+		"database": "Base de Datos",
+		"open-in-finder": "Mostrar en Finder",
+		"files": "{count} archivos",
+		"file-singular": "1 archivo",
+		"no-files": "Sin archivos",
+		"retention-note": "Los archivos con mas de 14 dias se eliminan automaticamente",
+		"transcriptions": "Transcripciones",
+		"no-transcriptions": "Sin transcripciones aun",
+		"transcriptions-count": "{count} transcripciones",
+		"copy-all": "Copiar todas las transcripciones",
+		"status-encoding": "Codificando video",
+		"status-frames-waiting": "{count} capturas en cola para codificar",
+		"status-transcribing": "Transcribiendo audio",
+		"status-audio-waiting": "{count} audios en cola para transcribir"
+	},
+	"rewind": {
+		"search-placeholder": "Buscar capturas y transcripciones...",
+		"results": "{count} resultados",
+		"result-singular": "1 resultado",
+		"no-results": "Sin resultados",
+		"transcriptions": "Transcripciones",
+		"loading": "Cargando..."
+	}
+}

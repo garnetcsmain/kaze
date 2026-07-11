@@ -1,0 +1,42 @@
+{
+	"appId": "com.garnetcs.kaze",
+	"productName": "Kaze",
+	"directories": {
+		"output": "dist/release"
+	},
+	"files": [
+		"dist/electron/**/*",
+		"dist/renderer/**/*"
+	],
+	"extraResources": [
+		{
+			"from": "i18n",
+			"to": "i18n"
+		}
+	],
+	"mac": {
+		"category": "public.app-category.productivity",
+		"target": [
+			{
+				"target": "dmg",
+				"arch": ["arm64"]
+			}
+		],
+		"icon": "build/icons/1024x1024.png",
+		"entitlements": "build/entitlements.mac.plist",
+		"entitlementsInherit": "build/entitlements.mac.plist",
+		"extendInfo": {
+			"NSMicrophoneUsageDescription": "Kaze needs microphone access to capture and transcribe audio.",
+			"NSScreenCaptureUsageDescription": "Kaze needs screen recording access to capture screenshots and system audio."
+		}
+	},
+	"win": {
+		"target": "nsis",
+		"files": ["bin/win32"]
+	},
+	"linux": {
+		"target": "AppImage"
+	},
+	"copyright": "Copyright © 2024 alikia2x",
+	"asar": false
+}
