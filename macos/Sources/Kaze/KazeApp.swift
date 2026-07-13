@@ -224,7 +224,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if !after.isEmpty || !ctx.contains("Pixelmator") { ok = false }
         }
 
-        print(ok ? "PASS: ledger + questions OK" : "FAIL")
+        // 3. Implementation drafts: save + read back by id, never touching confirmed/dismissed.
+        if let confirmedID = store.allObservations().first(where: { $0.confirmed })?.id {
+            store.saveImplementation(id: confirmedID, category: "shell",
+                                      implementation: "alias test='echo hi'", caveat: "")
+            let reloaded = store.observation(id: confirmedID)
+            print("implementation: category=\(reloaded?.implementationCategory ?? "nil") caveat=\(reloaded?.implementationCaveat ?? "(empty)")")
+            if reloaded?.implementation != "alias test='echo hi'" || reloaded?.implementationCategory != "shell" { ok = false }
+            if reloaded?.implementationCaveat != nil { ok = false }
+        } else {
+            print("FAIL: no confirmed observation to attach an implementation to")
+            ok = false
+        }
+
+        // 4. Resolutions: adopt → no recurrence within grace; recurrence after grace flags
+        //    the fix as not holding; ignore-with-reason lands in the prompt context.
+        if let id = store.allObservations().first(where: { $0.confirmed })?.id {
+            store.setResolution(id, resolution: "adopted", reason: nil)
+            let fresh = store.observation(id: id)?.stillRecurring ?? true
+            // Backdate the adoption past the grace window, then merge a new sighting.
+            _ = try? store.db.execute("UPDATE observation SET resolutionAt = ? WHERE id = ?",
+                                      [Date().timeIntervalSince1970 - 3 * 86400, id])
+            _ = try? store.mergeObservations([obs], day: "day4")
+            let recurring = store.observation(id: id)?.stillRecurring ?? false
+            let adoptedCtx = store.resolutionsContext().contains("ADOPTED")
+            print("resolution: freshRecurring=\(fresh) (expect false) recurringAfterGrace=\(recurring) (expect true) contextHasAdopted=\(adoptedCtx)")
+            if fresh || !recurring || !adoptedCtx { ok = false }
+
+            store.setResolution(id, resolution: "ignored", reason: "too fiddly to maintain")
+            let ignoredCtx = store.resolutionsContext()
+            print("resolution: contextHasIgnoredReason=\(ignoredCtx.contains("too fiddly to maintain"))")
+            if !ignoredCtx.contains("too fiddly to maintain") { ok = false }
+            store.setResolution(id, resolution: nil, reason: nil)
+            if store.observation(id: id)?.resolution != nil { ok = false }
+        } else {
+            print("FAIL: no confirmed observation for resolution test")
+            ok = false
+        }
+
+        print(ok ? "PASS: ledger + questions + implementation + resolutions OK" : "FAIL")
         cleanupAndExit(ok ? 0 : 1)
     }
 

@@ -29,8 +29,10 @@ struct InsightsView: View {
                 }
                 questionsSection
                 suggestionsSection
+                adoptedSection
                 digestsSection
                 ledgerSection
+                ignoredSection
             }
             .padding(18)
         }
@@ -91,16 +93,69 @@ struct InsightsView: View {
     }
 
     private var suggestionsSection: some View {
-        let confirmed = observations.filter(\.isActionable)
+        let undecided = observations.filter(\.needsDecision)
         return Group {
-            if !confirmed.isEmpty {
+            if !undecided.isEmpty {
                 VStack(alignment: .leading, spacing: 8) {
                     sectionLabel("Suggested optimizations")
-                    ForEach(confirmed) { obs in
-                        SuggestionCard(obs: obs) {
+                    ForEach(undecided) { obs in
+                        SuggestionCard(obs: obs, onDismiss: {
                             state.analysis?.analysisStore.setDismissed(obs.id, true)
                             reload()
+                        }, onDraft: {
+                            _ = await state.analysis?.generateImplementation(for: obs)
+                            reload()
+                        }, onResolve: { resolution, reason in
+                            state.analysis?.analysisStore.setResolution(obs.id, resolution: resolution, reason: reason)
+                            reload()
+                        })
+                    }
+                }
+            }
+        }
+    }
+
+    private var adoptedSection: some View {
+        let adopted = observations.filter { $0.isAdopted && !$0.dismissed }
+        return Group {
+            if !adopted.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    sectionLabel("Adopted — tracking outcome")
+                    Text("Kaze keeps watching: if a behavior shows up again after you adopted its fix, it's flagged here so you know the recommendation isn't working.")
+                        .font(.system(size: 11)).foregroundStyle(.secondary)
+                    ForEach(adopted) { obs in
+                        AdoptedCard(obs: obs) {
+                            state.analysis?.analysisStore.setResolution(obs.id, resolution: nil, reason: nil)
+                            reload()
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    private var ignoredSection: some View {
+        let ignored = observations.filter { $0.isIgnored && !$0.dismissed }
+        return Group {
+            if !ignored.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    sectionLabel("Ignored suggestions")
+                    ForEach(ignored) { obs in
+                        HStack(spacing: 8) {
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(obs.behavior).font(.system(size: 11)).lineLimit(1)
+                                if let reason = obs.resolutionReason, !reason.isEmpty {
+                                    Text(reason).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
+                                }
+                            }
+                            Spacer()
+                            Button("Reopen") {
+                                state.analysis?.analysisStore.setResolution(obs.id, resolution: nil, reason: nil)
+                                reload()
+                            }
+                            .controlSize(.mini)
+                        }
+                        .padding(.vertical, 3)
                     }
                 }
             }
@@ -308,6 +363,12 @@ private struct QuestionCard: View {
 private struct SuggestionCard: View {
     let obs: LedgerObservation
     let onDismiss: () -> Void
+    let onDraft: () async -> Void
+    let onResolve: (String, String?) -> Void
+
+    @State private var drafting = false
+    @State private var showIgnoreReason = false
+    @State private var ignoreReason = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
@@ -327,11 +388,119 @@ private struct SuggestionCard: View {
                     .background(.blue.opacity(0.15)).clipShape(Capsule())
                 Text("seen \(obs.daysSeen) days").font(.system(size: 10)).foregroundStyle(.secondary)
             }
+            if let implementation = obs.implementation, !implementation.isEmpty {
+                Divider().padding(.vertical, 2)
+                HStack {
+                    if let category = obs.implementationCategory, !category.isEmpty {
+                        Text(category.uppercased()).font(.system(size: 9, weight: .semibold)).kerning(0.8)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button {
+                        let pasteboard = NSPasteboard.general
+                        pasteboard.clearContents()
+                        pasteboard.setString(implementation, forType: .string)
+                    } label: {
+                        Label("Copy", systemImage: "doc.on.doc").font(.system(size: 10))
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.blue)
+                }
+                if let caveat = obs.implementationCaveat, !caveat.isEmpty {
+                    Label(caveat, systemImage: "exclamationmark.triangle.fill")
+                        .font(.system(size: 10)).foregroundStyle(.orange)
+                }
+                ScrollView {
+                    Text(implementation).font(.system(size: 11, design: .monospaced)).textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(maxHeight: 160)
+                .padding(8)
+                .background(.black.opacity(0.05))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+            } else {
+                Button {
+                    drafting = true
+                    Task { await onDraft(); drafting = false }
+                } label: {
+                    if drafting {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Label("Draft implementation", systemImage: "hammer.fill").font(.system(size: 11))
+                    }
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.blue)
+                .disabled(drafting)
+                .padding(.top, 2)
+            }
+
+            Divider().padding(.vertical, 2)
+            if showIgnoreReason {
+                HStack {
+                    TextField("Why ignore? (optional — teaches future suggestions)", text: $ignoreReason)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(size: 11))
+                        .onSubmit { onResolve("ignored", ignoreReason) }
+                    Button("Confirm") { onResolve("ignored", ignoreReason) }.controlSize(.small)
+                    Button("Cancel") { showIgnoreReason = false; ignoreReason = "" }.controlSize(.small)
+                }
+            } else {
+                HStack(spacing: 14) {
+                    Button {
+                        onResolve("adopted", nil)
+                    } label: {
+                        Label("I implemented this", systemImage: "checkmark.circle.fill").font(.system(size: 11))
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.green)
+                    Button {
+                        showIgnoreReason = true
+                    } label: {
+                        Label("Ignore", systemImage: "hand.raised").font(.system(size: 11))
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                }
+            }
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.yellow.opacity(0.08))
         .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(.yellow.opacity(0.3), lineWidth: 1))
         .clipShape(RoundedRectangle(cornerRadius: 10))
+    }
+}
+
+private struct AdoptedCard: View {
+    let obs: LedgerObservation
+    let onReopen: () -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: obs.stillRecurring ? "exclamationmark.arrow.circlepath" : "checkmark.seal.fill")
+                .foregroundStyle(obs.stillRecurring ? Color.orange : Color.green)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(obs.behavior).font(.system(size: 12, weight: .medium)).lineLimit(2)
+                Text(obs.stillRecurring
+                     ? "Not holding — behavior seen again after adoption (last \(Self.day(obs.lastSeen)))."
+                     : "Holding — no recurrence since adoption\(obs.resolutionAt.map { " on \(Self.day($0))" } ?? "").")
+                    .font(.system(size: 10)).foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button("Reopen") { onReopen() }.controlSize(.small)
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background((obs.stillRecurring ? Color.orange : Color.green).opacity(0.07))
+        .overlay(RoundedRectangle(cornerRadius: 10)
+            .strokeBorder((obs.stillRecurring ? Color.orange : Color.green).opacity(0.25), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+    }
+
+    private static func day(_ ts: Double) -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.string(from: Date(timeIntervalSince1970: ts))
     }
 }

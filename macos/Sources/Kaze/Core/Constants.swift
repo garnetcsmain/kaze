@@ -51,4 +51,9 @@ enum K {
     static let visionAmbiguousTokenMax = 18
     static let visionMaxImageDimension: CGFloat = 1280
     static let maxQuestionsPerDay = 5
+
+    /// After a fix is marked adopted, sightings within this window don't count as recurrence —
+    /// the next morning's analysis covers the adoption day itself, which includes pre-adoption
+    /// activity. Only analyses of days fully after adoption can flag a fix as "not holding".
+    static let adoptionGraceSeconds: TimeInterval = 36 * 3600
 }

@@ -129,6 +129,21 @@ enum JournalExporter {
                 lines.append("- **\(obs.behavior)**")
                 lines.append("  - Suggestion: \(obs.suggestion)")
                 if !obs.evidence.isEmpty { lines.append("  - Evidence: \(obs.evidence)") }
+                if let implementation = obs.implementation, !implementation.isEmpty {
+                    lines.append(contentsOf: implementationLines(implementation, category: obs.implementationCategory,
+                                                                  caveat: obs.implementationCaveat, indent: "  "))
+                }
+            }
+        }
+
+        let adopted = observations.filter { $0.isAdopted && !$0.dismissed }
+        if !adopted.isEmpty {
+            lines.append("")
+            lines.append("## 📊 Fix outcomes")
+            for obs in adopted {
+                lines.append(obs.stillRecurring
+                    ? "- ⚠️ **Not holding** — \(obs.behavior) (seen again after you adopted the fix)"
+                    : "- ✅ Holding — \(obs.behavior)")
             }
         }
 
@@ -184,7 +199,9 @@ enum JournalExporter {
     /// Appends confirmed observations not yet present (by anchor). Returns the URL if the
     /// file was created or changed, nil when there was nothing new to add.
     private static func appendToLedger(observations: [LedgerObservation], in dir: URL) throws -> URL? {
-        let confirmed = observations.filter { $0.confirmed && !$0.dismissed }
+        // Ignored suggestions stay out of the checklist — the user already decided against
+        // them (entries appended before the decision keep their line; append-only).
+        let confirmed = observations.filter { $0.confirmed && !$0.dismissed && !$0.isIgnored }
         let url = dir.appendingPathComponent("Kaze Improvements.md")
         let existing = (try? String(contentsOf: url, encoding: .utf8))
 
@@ -208,11 +225,35 @@ enum JournalExporter {
             guard content.contains(anchor) == false else { continue }
             let day = dayFmt.string(from: Date(timeIntervalSince1970: obs.lastSeen))
             content += "\n- [ ] **\(obs.behavior)** — \(obs.suggestion) *(confirmed \(day), seen \(obs.daysSeen)d)* \(anchor)"
+            if let implementation = obs.implementation, !implementation.isEmpty {
+                content += "\n" + implementationLines(implementation, category: obs.implementationCategory,
+                                                        caveat: obs.implementationCaveat, indent: "  ").joined(separator: "\n")
+            }
             appended += 1
         }
 
         guard existing == nil || appended > 0 else { return nil }
         try content.write(to: url, atomically: true, encoding: .utf8)
         return url
+    }
+
+    // MARK: - Shared formatting
+
+    /// Renders a drafted implementation as an indented fenced code block, with its freeform
+    /// tool-category label and any risk caveat. Kept out of the checklist line itself so the
+    /// line stays scannable; this is purely documentation — nothing here is ever executed.
+    private static func implementationLines(_ implementation: String, category: String?, caveat: String?, indent: String) -> [String] {
+        var lines: [String] = []
+        let label = (category?.isEmpty == false) ? " (\(category!))" : ""
+        lines.append("\(indent)- How to implement\(label):")
+        if let caveat, !caveat.isEmpty {
+            lines.append("\(indent)  - ⚠️ \(caveat)")
+        }
+        lines.append("\(indent)  ```")
+        for line in implementation.split(separator: "\n", omittingEmptySubsequences: false) {
+            lines.append("\(indent)  \(line)")
+        }
+        lines.append("\(indent)  ```")
+        return lines
     }
 }

@@ -65,8 +65,24 @@ struct LedgerObservation: Identifiable {
     var lastSeen: Double
     var confirmed: Bool        // promoted once daysSeen >= threshold
     var dismissed: Bool
+    var implementation: String?       // concrete, ready-to-use artifact (script/Shortcut/snippet/…)
+    var implementationCategory: String?  // freeform label the model chose, e.g. "shell", "macOS Shortcuts"
+    var implementationCaveat: String?    // non-empty only if the artifact is risky to apply blindly
+    var resolution: String?           // "adopted" | "ignored" | nil = undecided
+    var resolutionReason: String?     // why it was ignored (feeds future analysis prompts)
+    var resolutionAt: Double?         // unix seconds of the decision
 
     var isActionable: Bool { confirmed && !dismissed }
+    var isAdopted: Bool { resolution == "adopted" }
+    var isIgnored: Bool { resolution == "ignored" }
+    /// Confirmed, not hidden, and the user hasn't decided adopt/ignore yet.
+    var needsDecision: Bool { isActionable && resolution == nil }
+    /// The fix was adopted, yet the behavior kept appearing in analyses run after the grace
+    /// window — the recommendation (or its adoption) isn't working and should be revisited.
+    var stillRecurring: Bool {
+        guard isAdopted, let at = resolutionAt else { return false }
+        return lastSeen > at + K.adoptionGraceSeconds
+    }
 }
 
 struct DailyDigest: Identifiable {

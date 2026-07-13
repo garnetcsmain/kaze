@@ -87,7 +87,8 @@ final class AnalysisService: ObservableObject {
 
             let system = Self.systemPrompt(
                 ledger: analysisStore.ledgerContext(),
-                userExplanations: analysisStore.answersContext())
+                userExplanations: analysisStore.answersContext(),
+                resolutions: analysisStore.resolutionsContext())
             let user = DayCompactor.renderPrompt(data, visuals: visuals)
 
             let jsonText = try await active.provider.completeJSON(
@@ -99,7 +100,16 @@ final class AnalysisService: ObservableObject {
             }
             let analysis = try JSONDecoder().decode(DailyAnalysis.self, from: jsonData)
 
-            let newlyConfirmed = try analysisStore.mergeObservations(analysis.observations, day: data.day)
+            var newlyConfirmed = try analysisStore.mergeObservations(analysis.observations, day: data.day)
+
+            // A behavior just crossed the confirmation threshold — draft how to actually fix
+            // it (script/Shortcut/snippet/process change), not just the one-line suggestion.
+            // Never applied automatically; only ever written for the user to review.
+            if !newlyConfirmed.isEmpty {
+                await generateImplementations(for: newlyConfirmed, provider: active.provider)
+                newlyConfirmed = newlyConfirmed.map { analysisStore.observation(id: $0.id) ?? $0 }
+            }
+
             try analysisStore.saveDigest(
                 day: data.day, summary: analysis.daySummary,
                 focusAreas: analysis.focusAreas,
@@ -217,6 +227,112 @@ final class AnalysisService: ObservableObject {
         }
     }
 
+    // MARK: - Implementation drafting
+
+    private struct ImplementationOutput: Codable {
+        struct Item: Codable {
+            let index: Int
+            let toolCategory: String
+            let implementation: String
+            let caveat: String
+
+            enum CodingKeys: String, CodingKey {
+                case index, implementation, caveat
+                case toolCategory = "tool_category"
+            }
+        }
+        let implementations: [Item]
+    }
+
+    /// Drafts a concrete, ready-to-use implementation for each observation (a script, a
+    /// Shortcut's steps, an editor snippet, a process change — whatever fits) and persists it.
+    /// This is a draft only: nothing here is ever run or applied automatically, it's written
+    /// for the user to review in Insights/the Obsidian journal and adopt by hand.
+    func generateImplementations(for observations: [LedgerObservation], provider: LLMProvider) async {
+        guard !observations.isEmpty else { return }
+        do {
+            let user = Self.implementationUserPrompt(observations)
+            let jsonText = try await provider.completeJSON(
+                system: Self.implementationSystemPrompt, user: user, schema: Self.implementationSchema)
+            guard let jsonData = jsonText.data(using: .utf8) else { return }
+            let output = try JSONDecoder().decode(ImplementationOutput.self, from: jsonData)
+            for item in output.implementations {
+                let idx = item.index - 1
+                guard observations.indices.contains(idx) else { continue }
+                analysisStore.saveImplementation(
+                    id: observations[idx].id, category: item.toolCategory,
+                    implementation: item.implementation, caveat: item.caveat)
+            }
+            Log.info("Implementation drafts generated for \(output.implementations.count) confirmed behavior(s)")
+        } catch {
+            Log.error("Implementation generation failed: \(error)")
+        }
+    }
+
+    /// Manual entry point for the Insights "Draft implementation" button — used to retrofit
+    /// ledger entries confirmed before this feature existed, or to regenerate one on demand.
+    @discardableResult
+    func generateImplementation(for observation: LedgerObservation) async -> Bool {
+        guard let active = LLMSettings.makeActiveProvider() else {
+            lastError = "No API key set for \(LLMSettings.activeProvider.displayName) (Settings → AI Analysis)."
+            return false
+        }
+        await generateImplementations(for: [observation], provider: active.provider)
+        return true
+    }
+
+    private static func implementationUserPrompt(_ observations: [LedgerObservation]) -> String {
+        observations.enumerated().map { i, obs in
+            """
+            \(i + 1). Behavior: \(obs.behavior)
+               Category: \(obs.category)
+               Evidence: \(obs.evidence)
+               Existing one-line suggestion: \(obs.suggestion)
+               Seen \(obs.daysSeen) distinct days, \(obs.totalFrequency) total occurrences.
+            """
+        }.joined(separator: "\n\n")
+    }
+
+    private static let implementationSystemPrompt = """
+        For each confirmed repeated low-value behavior below, write a concrete, ready-to-use \
+        implementation the person can adopt themselves — not just what to do, but exactly how. \
+        Prefer a copy-pasteable artifact when the behavior is toolable: a shell alias/function, \
+        the exact steps for a macOS Shortcut, an editor snippet or keybinding, a browser \
+        bookmarklet, a Raycast/Alfred snippet, a launchd/cron job, or whatever else best fits \
+        THIS behavior and evidence — pick whichever tool is most natural for it, do not force a \
+        single format. If the behavior isn't something a tool can fix (a habit or process \
+        issue), give a specific, concrete process change instead of generic advice.
+
+        Ground the implementation in the evidence given — reference the actual apps/steps seen, \
+        not a generic template. Set caveat to a short warning if the implementation touches \
+        system settings, credentials, deletes data, or is otherwise risky to apply blindly; \
+        leave it an empty string otherwise. This implementation will only ever be shown to the \
+        person for their own review — never assume it will run automatically, and never write \
+        it as though you are the one applying it.
+        """
+
+    private static let implementationSchema: [String: Any] = [
+        "type": "object",
+        "additionalProperties": false,
+        "properties": [
+            "implementations": [
+                "type": "array",
+                "items": [
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": [
+                        "index": ["type": "integer"],
+                        "tool_category": ["type": "string"],
+                        "implementation": ["type": "string"],
+                        "caveat": ["type": "string"],
+                    ],
+                    "required": ["index", "tool_category", "implementation", "caveat"],
+                ],
+            ],
+        ],
+        "required": ["implementations"],
+    ]
+
     // MARK: - Notifications
 
     func requestNotificationPermission() {
@@ -239,6 +355,10 @@ final class AnalysisService: ObservableObject {
         if open > 0 {
             content.body += "\n\(open) unclear activit\(open == 1 ? "y needs" : "ies need") your explanation — open Insights."
         }
+        let recurring = analysisStore.allObservations().filter(\.stillRecurring).count
+        if recurring > 0 {
+            content.body += "\n\(recurring) adopted fix\(recurring == 1 ? " isn't" : "es aren't") holding — behavior seen again."
+        }
         content.sound = .default
         let request = UNNotificationRequest(identifier: "kaze-digest-\(digest.day)", content: content, trigger: nil)
         center.add(request)
@@ -246,7 +366,7 @@ final class AnalysisService: ObservableObject {
 
     // MARK: - Prompt & schema
 
-    private static func systemPrompt(ledger: String, userExplanations: String) -> String {
+    private static func systemPrompt(ledger: String, userExplanations: String, resolutions: String) -> String {
         """
         You analyze one day of a knowledge worker's on-screen activity (OCR'd screen text \
         plus audio transcript excerpts) to find small, repeated inefficiencies worth automating. \
@@ -273,6 +393,14 @@ final class AnalysisService: ObservableObject {
         The user has explained some previously-unclear activities themselves. Trust these \
         explanations and use them to interpret similar screens:
         \(userExplanations)
+
+        Decisions the user already made on past suggestions:
+        \(resolutions)
+        For ADOPTED items: if today's timeline still shows that behavior, report it again with \
+        the SAME wording (so recurrence is tracked) — the fix isn't holding. For IGNORED items: \
+        never repeat the same suggestion; the stated reason explains what was wrong with it. \
+        Only report that behavior again if you can propose a materially different fix that \
+        respects the reason.
         """
     }
 

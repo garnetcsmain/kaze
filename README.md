@@ -19,8 +19,9 @@ flowchart LR
   W --> C
   C --> L[Daily AI analysis<br>Claude / GPT / Gemini]
   L --> G[Observations ledger<br>3-day confirmation]
-  G --> D[Morning digest<br>notification]
-  G --> J[Obsidian journal]
+  G --> I[Implementation draft<br>script / Shortcut / snippet]
+  I --> D[Morning digest<br>notification]
+  I --> J[Obsidian journal]
   L --> Q[Questions you answer<br>teach future analyses]
 ```
 
@@ -50,7 +51,9 @@ flowchart LR
 - Morning digest at 7:00 with a macOS notification — plus run-on-demand from the menu bar
 - **Vision sampling**: screens where real time was spent but OCR read little (design tools, video, image-heavy work) are sent as downscaled screenshots — up to 12 per day — so visual work is understood too
 - **It asks when it can't tell**: activity that neither OCR nor vision can identify becomes a question in the Insights window (with a frame thumbnail). Your one-line answers persist and feed every future analysis — Kaze gets smarter about your work within days
-- **Insights window**: digests, suggested optimizations (dismissible), patterns being watched, open questions, and a dry-run mode that previews the exact prompt and token cost without calling any API
+- **Implementation drafts, not just suggestions**: the moment a pattern is confirmed, a second pass drafts the concrete fix — a shell alias, the exact Shortcut steps, an editor snippet, a bookmarklet, a cron job, or a specific process change — grounded in the actual evidence seen. Draft-only: nothing is ever run or installed automatically, it's copy-paste material for you to review and adopt (or not)
+- **Outcome tracking**: mark each suggestion "implemented" or "ignore" (with a why). Ignored ones are never re-suggested; adopted ones are watched — if the behavior shows up again after you adopted the fix, Kaze flags it as *not holding* in Insights, the journal, and the morning notification. Your decisions and reasons feed every future analysis, so recommendations get better instead of repeating themselves
+- **Insights window**: digests, suggested optimizations with their implementation drafts (dismissible, draftable on demand), patterns being watched, open questions, and a dry-run mode that previews the exact prompt and token cost without calling any API
 
 ### Obsidian journal
 

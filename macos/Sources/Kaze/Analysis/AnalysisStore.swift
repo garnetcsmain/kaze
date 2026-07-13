@@ -57,6 +57,14 @@ final class AnalysisStore {
                 UNIQUE(day, ts)
             )
             """)
+        // Added after initial release — ALTER fails harmlessly (via try?) once the column
+        // already exists, so this doubles as the migration for existing analysis.db files.
+        _ = try? db.execute("ALTER TABLE observation ADD COLUMN implementation TEXT")
+        _ = try? db.execute("ALTER TABLE observation ADD COLUMN implementationCategory TEXT")
+        _ = try? db.execute("ALTER TABLE observation ADD COLUMN implementationCaveat TEXT")
+        _ = try? db.execute("ALTER TABLE observation ADD COLUMN resolution TEXT")
+        _ = try? db.execute("ALTER TABLE observation ADD COLUMN resolutionReason TEXT")
+        _ = try? db.execute("ALTER TABLE observation ADD COLUMN resolutionAt REAL")
     }
 
     // MARK: - Digests
@@ -165,6 +173,62 @@ final class AnalysisStore {
         _ = try? db.execute("UPDATE observation SET dismissed = ? WHERE id = ?", [dismissed ? 1 : 0, id])
     }
 
+    /// Confirmed behaviors with no drafted implementation yet — either newly confirmed and
+    /// awaiting the automatic draft, or confirmed before this feature existed.
+    func observationsNeedingImplementation() -> [LedgerObservation] {
+        allObservations().filter { $0.isActionable && ($0.implementation?.isEmpty ?? true) }
+    }
+
+    func observation(id: Int64) -> LedgerObservation? {
+        (try? db.query("SELECT * FROM observation WHERE id = ?", [id]))?.first.flatMap(ledger(from:))
+    }
+
+    /// Records the user's decision on a confirmed suggestion — "adopted" or "ignored" (with
+    /// an optional why) — or clears it (nil) to reopen. The decision and reason are fed back
+    /// into future analysis prompts, and adopted fixes are watched for recurrence.
+    func setResolution(_ id: Int64, resolution: String?, reason: String?) {
+        if let resolution {
+            let trimmed = reason?.trimmingCharacters(in: .whitespacesAndNewlines)
+            _ = try? db.execute("""
+                UPDATE observation SET resolution = ?, resolutionReason = ?, resolutionAt = ?
+                WHERE id = ?
+                """, [resolution, (trimmed?.isEmpty == false) ? trimmed : nil,
+                      Date().timeIntervalSince1970, id])
+        } else {
+            _ = try? db.execute("""
+                UPDATE observation SET resolution = NULL, resolutionReason = NULL, resolutionAt = NULL
+                WHERE id = ?
+                """, [id])
+        }
+    }
+
+    /// Decisions already made on past suggestions, injected into the analysis prompt so the
+    /// model tracks whether adopted fixes hold and stops repeating rejected recommendations.
+    func resolutionsContext() -> String {
+        let resolved = allObservations(includeDismissed: true).filter { $0.resolution != nil }
+        guard !resolved.isEmpty else { return "(none yet)" }
+        let dayFmt = DateFormatter()
+        dayFmt.dateFormat = "yyyy-MM-dd"
+        return resolved.map { o in
+            let day = dayFmt.string(from: Date(timeIntervalSince1970: o.resolutionAt ?? 0))
+            if o.isAdopted {
+                let status = o.stillRecurring ? "behavior has STILL been seen since" : "no recurrence so far"
+                return "- ADOPTED \(day) (\(status)): \(o.behavior)"
+            }
+            let why = (o.resolutionReason?.isEmpty == false) ? " — reason: \(o.resolutionReason!)" : ""
+            return "- IGNORED \(day)\(why): \(o.behavior)"
+        }.joined(separator: "\n")
+    }
+
+    /// Saves the drafted implementation for a confirmed observation. Never applied
+    /// automatically — this only persists text for the user to review in Insights/Journal.
+    func saveImplementation(id: Int64, category: String, implementation: String, caveat: String) {
+        _ = try? db.execute("""
+            UPDATE observation SET implementation = ?, implementationCategory = ?, implementationCaveat = ?
+            WHERE id = ?
+            """, [implementation, category, caveat.isEmpty ? nil : caveat, id])
+    }
+
     private func ledger(from row: SQLRow) -> LedgerObservation? {
         guard let id = row.int("id"), let key = row.string("key"),
               let behavior = row.string("behavior") else { return nil }
@@ -178,7 +242,13 @@ final class AnalysisStore {
             firstSeen: row.double("firstSeen") ?? 0,
             lastSeen: row.double("lastSeen") ?? 0,
             confirmed: (row.int("confirmed") ?? 0) == 1,
-            dismissed: (row.int("dismissed") ?? 0) == 1)
+            dismissed: (row.int("dismissed") ?? 0) == 1,
+            implementation: row.string("implementation"),
+            implementationCategory: row.string("implementationCategory"),
+            implementationCaveat: row.string("implementationCaveat"),
+            resolution: row.string("resolution"),
+            resolutionReason: row.string("resolutionReason"),
+            resolutionAt: row.double("resolutionAt"))
     }
 
     // MARK: - Questions (unclear activity → ask the user)
