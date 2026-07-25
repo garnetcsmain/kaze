@@ -115,7 +115,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         if env["KAZE_ANALYZE_DRYRUN"] != nil || env["KAZE_ANALYZE_RUN"] != nil {
-            Task { await Self.runHeadless(live: env["KAZE_ANALYZE_RUN"] != nil) }
+            Task { await Self.runHeadless(live: env["KAZE_ANALYZE_RUN"] != nil, day: env["KAZE_ANALYZE_DAY"]) }
             return
         }
 
@@ -144,9 +144,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// Headless entry point for the analyzer — used by tests and cron. Prints to stdout
-    /// and exits without ever showing UI or starting capture.
+    /// and exits without ever showing UI or starting capture. `day` (KAZE_ANALYZE_DAY,
+    /// `YYYY-MM-DD`) picks the day to compact; without it, yesterday — which is the useful
+    /// default for cron but usually empty when you want to price a backfill.
     @MainActor
-    static func runHeadless(live: Bool) async {
+    static func runHeadless(live: Bool, day: String?) async {
         Paths.ensureDirectories()
         guard let db = try? Schema.open() else {
             print("ERROR: could not open database"); exit(1)
@@ -158,10 +160,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let service = try? AnalysisService(store: store, frameExtractor: FrameExtractor()) else {
             print("ERROR: could not init analysis service"); exit(1)
         }
-        let yesterday = Calendar.current.date(byAdding: .day, value: -1, to: Date())!
+        let target: Date
+        if let day {
+            guard let parsed = DayLabel.date(from: day) else {
+                print("ERROR: expected KAZE_ANALYZE_DAY=YYYY-MM-DD, got \"\(day)\""); exit(1)
+            }
+            target = parsed
+        } else {
+            target = Calendar.current.date(byAdding: .day, value: -1, to: Date())!
+        }
 
         do {
-            let dry = try await service.dryRun(date: yesterday)
+            let dry = try await service.dryRun(date: target)
             print("DRYRUN day=\(dry.day) frames=\(dry.frames) segments=\(dry.segments) ambiguous=\(dry.ambiguousSegments) approxTokens=\(dry.approxTokens) chars=\(dry.promptChars)")
             print("----- prompt preview -----")
             print(dry.preview)
@@ -183,7 +193,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if live {
             let kind = LLMSettings.activeProvider
             print("Running live analysis (provider=\(kind.displayName), model=\(LLMSettings.model(for: kind)))…")
-            if let digest = await service.analyze(date: yesterday, notify: false) {
+            if let digest = await service.analyze(date: target, notify: false) {
                 print("SUMMARY: \(digest.summary)")
                 print("FOCUS: \(digest.focusAreas.joined(separator: ", "))")
                 let obs = service.analysisStore.allObservations()
