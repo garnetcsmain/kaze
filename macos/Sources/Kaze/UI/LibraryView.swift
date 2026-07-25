@@ -10,7 +10,10 @@ struct LibraryView: View {
     var body: some View {
         ScrollView {
             VStack(spacing: 14) {
-                StatusBarView(status: model.status)
+                StatusBarView(
+                    status: model.status,
+                    preparing: state.preparingDatabase,
+                    loaded: model.hasLoaded)
                 StorageOverview(stats: model.stats)
                 FileSection(
                     title: "Screen Recordings",
@@ -50,20 +53,51 @@ struct LibraryView: View {
 
 // MARK: - Model
 
+/// Nothing here touches the database or the filesystem on the main thread. Both are slow
+/// and, in the database's case, shared with the capture pipeline — a synchronous read from
+/// this actor blocks the whole app until the pipeline's current query finishes.
 @MainActor
 final class LibraryModel: ObservableObject {
     @Published var stats = LibraryStats()
     @Published var status = ActivityStatus()
     @Published var transcriptions: [TranscriptionSegment] = []
     @Published var copiedAll = false
+    @Published var hasLoaded = false
 
     private var statusTimer: Timer?
+    private var refreshTask: Task<Void, Never>?
+    private var statusTask: Task<Void, Never>?
     private var store: Store? { AppState.shared.store }
 
+    /// Everything the window shows, gathered in a single off-main pass.
+    private struct Snapshot: Sendable {
+        var stats = LibraryStats()
+        var status = ActivityStatus()
+        var transcriptions: [TranscriptionSegment] = []
+    }
+
     func refreshAll() {
-        refreshStats()
-        refreshStatus()
-        refreshTranscriptions()
+        guard refreshTask == nil else { return } // one in flight is enough; focus can fire repeatedly
+        let store = self.store
+        refreshTask = Task { [weak self] in
+            let snapshot = await Task.detached(priority: .userInitiated) { () -> Snapshot in
+                var snapshot = Snapshot()
+                snapshot.stats = Self.collectStats()
+                if let store {
+                    snapshot.status = (try? store.activityStatus()) ?? ActivityStatus()
+                    snapshot.transcriptions = (try? store.recentTranscriptions(limit: 30)) ?? []
+                }
+                return snapshot
+            }.value
+
+            guard let self else { return }
+            self.refreshTask = nil
+            guard !Task.isCancelled else { return }
+            self.stats = snapshot.stats
+            self.status = snapshot.status
+            self.transcriptions = snapshot.transcriptions
+            self.hasLoaded = true
+        }
     }
 
     func startStatusPolling() {
@@ -76,9 +110,23 @@ final class LibraryModel: ObservableObject {
     func stopStatusPolling() {
         statusTimer?.invalidate()
         statusTimer = nil
+        statusTask?.cancel()
+        refreshTask?.cancel()
     }
 
-    private func refreshStats() {
+    private func refreshStatus() {
+        guard statusTask == nil, let store else { return } // never let polls stack up
+        statusTask = Task { [weak self] in
+            let next = await store.read { (try? $0.activityStatus()) ?? ActivityStatus() }
+            guard let self else { return }
+            self.statusTask = nil
+            guard !Task.isCancelled else { return }
+            self.status = next
+        }
+    }
+
+    /// Runs off the main thread — `recordings/` alone holds hundreds of files, each needing a stat.
+    private nonisolated static func collectStats() -> LibraryStats {
         var next = LibraryStats()
         next.videoFiles = listFiles(in: Paths.recordingsDir)
         next.audioFiles = listFiles(in: Paths.audioDir)
@@ -86,10 +134,10 @@ final class LibraryModel: ObservableObject {
         next.audioSize = next.audioFiles.reduce(0) { $0 + $1.size }
         let dbAttrs = try? FileManager.default.attributesOfItem(atPath: Paths.dbFile.path)
         next.databaseSize = (dbAttrs?[.size] as? Int64) ?? 0
-        stats = next
+        return next
     }
 
-    private func listFiles(in dir: URL) -> [LibraryFile] {
+    private nonisolated static func listFiles(in dir: URL) -> [LibraryFile] {
         let fm = FileManager.default
         guard let names = try? fm.contentsOfDirectory(atPath: dir.path) else { return [] }
         return names
@@ -105,33 +153,42 @@ final class LibraryModel: ObservableObject {
             .sorted { $0.modifiedAt > $1.modifiedAt }
     }
 
-    private func refreshStatus() {
-        guard let store else { return }
-        status = (try? store.activityStatus()) ?? ActivityStatus()
-    }
-
-    private func refreshTranscriptions() {
-        guard let store else { return }
-        transcriptions = (try? store.recentTranscriptions(limit: 30)) ?? []
-    }
-
     // MARK: Actions
 
     func deleteVideo(_ file: LibraryFile) {
-        try? FileManager.default.removeItem(at: Paths.recordingsDir.appendingPathComponent(file.name))
-        try? store?.deleteVideoRecords(filename: file.name)
-        refreshAll()
+        let store = self.store
+        let name = file.name
+        Task {
+            await Task.detached(priority: .userInitiated) {
+                try? FileManager.default.removeItem(at: Paths.recordingsDir.appendingPathComponent(name))
+                try? store?.deleteVideoRecords(filename: name)
+            }.value
+            self.refreshAll()
+        }
     }
 
     func deleteAudio(_ file: LibraryFile) {
-        try? FileManager.default.removeItem(at: Paths.audioDir.appendingPathComponent(file.name))
-        try? store?.deleteAudioRecords(filename: file.name)
-        refreshAll()
+        let store = self.store
+        let name = file.name
+        Task {
+            await Task.detached(priority: .userInitiated) {
+                try? FileManager.default.removeItem(at: Paths.audioDir.appendingPathComponent(name))
+                try? store?.deleteAudioRecords(filename: name)
+            }.value
+            self.refreshAll()
+        }
     }
 
     func deleteTranscription(_ id: Int64) {
-        try? store?.deleteTranscription(id)
-        refreshTranscriptions()
+        guard let store else { return }
+        transcriptions.removeAll { $0.id == id } // optimistic — the reload confirms it
+        Task {
+            let remaining = await store.read { store -> [TranscriptionSegment] in
+                try? store.deleteTranscription(id)
+                return (try? store.recentTranscriptions(limit: 30)) ?? []
+            }
+            self.transcriptions = remaining
+        }
     }
 
     func copyTranscription(_ text: String) {
@@ -141,12 +198,12 @@ final class LibraryModel: ObservableObject {
 
     func copyAllTranscriptions() {
         guard let store else { return }
-        let all = (try? store.recentTranscriptions(limit: 10000)) ?? []
-        let text = all.reversed().map(\.text).joined(separator: "\n") // chronological
-        copyTranscription(text)
-        copiedAll = true
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
-            self?.copiedAll = false
+        Task {
+            let all = await store.read { (try? $0.recentTranscriptions(limit: 10_000)) ?? [] }
+            self.copyTranscription(all.reversed().map(\.text).joined(separator: "\n")) // chronological
+            self.copiedAll = true
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            self.copiedAll = false
         }
     }
 }
@@ -198,12 +255,18 @@ private struct SectionLabel: View {
 
 private struct StatusBarView: View {
     let status: ActivityStatus
+    let preparing: Bool
+    let loaded: Bool
 
     var body: some View {
         HStack(spacing: 8) {
-            Circle()
-                .fill(status.isActive ? .green : .secondary.opacity(0.4))
-                .frame(width: 8, height: 8)
+            if preparing || !loaded {
+                ProgressView().controlSize(.small).scaleEffect(0.6).frame(width: 8, height: 8)
+            } else {
+                Circle()
+                    .fill(status.isActive ? .green : .secondary.opacity(0.4))
+                    .frame(width: 8, height: 8)
+            }
             Text(statusText)
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
@@ -213,6 +276,8 @@ private struct StatusBarView: View {
     }
 
     private var statusText: String {
+        if preparing { return "Preparing database…" }
+        if !loaded { return "Loading…" }
         var parts: [String] = []
         if status.encoding { parts.append("Encoding video") }
         if status.framesWaiting > 0 { parts.append("\(status.framesWaiting) frames waiting") }

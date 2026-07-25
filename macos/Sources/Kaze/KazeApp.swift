@@ -102,6 +102,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Task { @MainActor in Self.runJournalExport(folderOverride: env["KAZE_JOURNAL_PATH"]) }
             return
         }
+        if env["KAZE_WEEK_SELFTEST"] != nil {
+            Task { @MainActor in Self.weekSelfTest() }
+            return
+        }
+        if env["KAZE_FEED_EXPORT"] != nil {
+            Task { @MainActor in Self.runFeedExport(folderOverride: env["KAZE_FEED_PATH"]) }
+            return
+        }
+        if let week = env["KAZE_ANALYZE_WEEK"] {
+            Task { await Self.runWeekBackfill(week) }
+            return
+        }
         if env["KAZE_ANALYZE_DRYRUN"] != nil || env["KAZE_ANALYZE_RUN"] != nil {
             Task { await Self.runHeadless(live: env["KAZE_ANALYZE_RUN"] != nil) }
             return
@@ -139,6 +151,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let db = try? Schema.open() else {
             print("ERROR: could not open database"); exit(1)
         }
+        // Same one-time maintenance the app does at startup.
+        try? Schema.ensureIndexes(db)
+        try? Schema.ensureFastSearchDeletes(db)
         let store = Store(db: db)
         guard let service = try? AnalysisService(store: store, frameExtractor: FrameExtractor()) else {
             print("ERROR: could not init analysis service"); exit(1)
@@ -146,7 +161,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let yesterday = Calendar.current.date(byAdding: .day, value: -1, to: Date())!
 
         do {
-            let dry = try service.dryRun(date: yesterday)
+            let dry = try await service.dryRun(date: yesterday)
             print("DRYRUN day=\(dry.day) frames=\(dry.frames) segments=\(dry.segments) ambiguous=\(dry.ambiguousSegments) approxTokens=\(dry.approxTokens) chars=\(dry.promptChars)")
             print("----- prompt preview -----")
             print(dry.preview)
@@ -209,6 +224,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if day < 3 && (entry?.confirmed ?? true) { ok = false }
             if day == 3 && (newly.count != 1 || entry?.confirmed != true) { ok = false }
         }
+
+        // 1b. Re-analyzing a day that was already merged must not inflate daysSeen. Week
+        //     backfill and "Analyze today so far" both re-merge days, and an inflated count
+        //     would confirm a behavior that was never seen on three distinct days.
+        let beforeRemerge = store.allObservations().first?.daysSeen ?? 0
+        _ = try? store.mergeObservations([obs], day: "day3")
+        let afterRemerge = store.allObservations().first?.daysSeen ?? 0
+        print("re-merge of day3: daysSeen \(beforeRemerge) -> \(afterRemerge) (expect unchanged at 3)")
+        if afterRemerge != 3 { ok = false }
 
         // 2. Questions: dedupe by (day, ts), answer flow, answers feed the prompt context.
         store.addQuestion(day: "day1", ts: 1000, duration: 300, frameID: nil, hint: "maybe a design tool")
@@ -322,6 +346,142 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             print("JOURNAL export failed: \(error)")
             exit(1)
         }
+    }
+
+    /// Verifies the ISO-week math the week backfill depends on, and the one invariant that
+    /// silently breaks it: `DayLabel` must produce exactly the string SQLite's
+    /// `date(createdAt,'unixepoch','localtime')` produces, or `recordedDays()` never matches
+    /// and backfill reports nothing to do.
+    @MainActor
+    static func weekSelfTest() {
+        var ok = true
+
+        // ISO weeks disagree with calendar years at both ends: week 1 can start in December,
+        // Dec 29-31 can belong to the next year's week 1, and some years have 53 weeks.
+        for (year, weeks) in [(2020, 53), (2024, 52), (2025, 52), (2026, 53)] {
+            for week in 1...weeks {
+                let days = AnalysisService.days(inISOWeek: year, week: week)
+                guard days.count == 7 else {
+                    print("FAIL \(year)-W\(week): got \(days.count) days"); ok = false; continue
+                }
+                let weekday = AnalysisService.isoCalendar.component(.weekday, from: days[0])
+                if weekday != 2 { // 1 = Sunday, so Monday is 2
+                    print("FAIL \(year)-W\(week) starts on weekday \(weekday), expected Monday(2)"); ok = false
+                }
+                for day in days {
+                    let (y, w) = AnalysisService.isoWeek(of: day)
+                    if (y, w) != (year, week) {
+                        print("FAIL \(DayLabel.string(from: day)) maps to \(y)-W\(w), expected \(year)-W\(week)")
+                        ok = false
+                    }
+                }
+            }
+        }
+        print("iso weeks: round-tripped 2020/2024/2025/2026, Monday-first, members consistent")
+
+        // DayLabel vs SQLite, against the real recorded data.
+        Paths.ensureDirectories()
+        if let db = try? Schema.open() {
+            let store = Store(db: db)
+            let days = (try? store.recordedDays()) ?? []
+            let rows = (try? store.db.query(
+                "SELECT MIN(createdAt) AS lo, MAX(createdAt) AS hi FROM frame")) ?? []
+            var mismatches = 0
+            for stamp in [rows.first?.double("lo"), rows.first?.double("hi")].compactMap({ $0 }) {
+                let fromSQL = ((try? store.db.query(
+                    "SELECT date(?, 'unixepoch', 'localtime') AS d", [stamp])) ?? [])
+                    .first?.string("d") ?? "?"
+                let fromSwift = DayLabel.string(from: Date(timeIntervalSince1970: stamp))
+                if fromSQL != fromSwift {
+                    print("FAIL day label mismatch: sqlite=\(fromSQL) swift=\(fromSwift)")
+                    mismatches += 1
+                    ok = false
+                }
+            }
+            // Every recorded day must parse back, or weeksNeedingAnalysis silently skips it.
+            let unparseable = days.filter { DayLabel.date(from: $0) == nil }
+            if !unparseable.isEmpty {
+                print("FAIL \(unparseable.count) recorded day(s) unparseable, e.g. \(unparseable[0])")
+                ok = false
+            }
+            print("day labels: \(days.count) recorded day(s), \(mismatches) sqlite/swift mismatch(es), \(unparseable.count) unparseable")
+            db.close()
+        } else {
+            print("day labels: skipped (no database)")
+        }
+
+        print(ok ? "PASS: iso week + day label math OK" : "FAIL")
+        exit(ok ? 0 : 1)
+    }
+
+    /// Headless JSONL feed export — KAZE_FEED_EXPORT=1, optional KAZE_FEED_PATH to override
+    /// the configured folder. Reads analysis.db only; never calls the API.
+    @MainActor
+    static func runFeedExport(folderOverride: String?) {
+        Paths.ensureDirectories()
+        guard let store = try? AnalysisStore() else {
+            print("ERROR: could not open analysis.db"); exit(1)
+        }
+        do {
+            let urls = try FeedExporter.export(store: store, folderOverride: folderOverride)
+            print("FEED wrote \(urls.count) file(s):")
+            for url in urls {
+                let records = (try? String(contentsOf: url, encoding: .utf8))?
+                    .split(separator: "\n", omittingEmptySubsequences: true).count ?? 0
+                print("  \(url.path) (\(records) record(s))")
+            }
+            exit(0)
+        } catch {
+            print("FEED export failed: \(error)")
+            exit(1)
+        }
+    }
+
+    /// Headless week backfill — KAZE_ANALYZE_WEEK=2026-W30. Analyzes every recorded day of
+    /// that ISO week that has no digest yet (skipping today), then exports as usual.
+    @MainActor
+    static func runWeekBackfill(_ spec: String) async {
+        // Strictly YYYY-Www. Calendar normalizes W0 / W99 / W53-of-a-52-week-year into a
+        // neighbouring year instead of rejecting them, so a loose parser would silently
+        // analyze a different week than the caller asked for.
+        let parts = spec.uppercased().split(separator: "-", maxSplits: 1, omittingEmptySubsequences: false)
+        guard parts.count == 2, parts[0].count == 4, parts[1].count == 3, parts[1].hasPrefix("W"),
+              parts[0].allSatisfy(\.isASCII), parts[1].dropFirst().allSatisfy(\.isASCII),
+              let year = Int(parts[0]), let week = Int(parts[1].dropFirst())
+        else {
+            print("ERROR: expected KAZE_ANALYZE_WEEK=YYYY-Www (e.g. 2026-W30), got \"\(spec)\"")
+            exit(1)
+        }
+        guard !AnalysisService.days(inISOWeek: year, week: week).isEmpty else {
+            print("ERROR: \(spec) is not a real ISO week")
+            exit(1)
+        }
+
+        Paths.ensureDirectories()
+        guard let db = try? Schema.open() else {
+            print("ERROR: could not open database"); exit(1)
+        }
+        try? Schema.ensureIndexes(db)
+        try? Schema.ensureFastSearchDeletes(db)
+        guard let service = try? AnalysisService(
+            store: Store(db: db), frameExtractor: FrameExtractor())
+        else {
+            print("ERROR: could not init analysis service"); exit(1)
+        }
+
+        let analyzed = await service.analyzeWeek(year: year, week: week)
+        if !analyzed.isEmpty {
+            print("WEEK \(spec): analyzed \(analyzed.count) day(s): \(analyzed.joined(separator: ", "))")
+            exit(0)
+        }
+        // Nothing analyzed is only success when there was nothing to do — a cron caller has
+        // to be able to tell that apart from a bad key, a rate limit or a network failure.
+        if let error = service.lastError {
+            print("WEEK \(spec): failed — \(error)")
+            exit(1)
+        }
+        print("WEEK \(spec): nothing to analyze (no recorded days without a digest)")
+        exit(0)
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {

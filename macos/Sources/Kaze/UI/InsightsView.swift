@@ -10,6 +10,10 @@ struct InsightsView: View {
     @State private var questions: [OpenQuestion] = []
     @State private var dryRun: AnalysisService.DryRunResult?
     @State private var statusMessage: String?
+    @State private var weekBacklog: [AnalysisService.WeekBacklog] = []
+    /// Local, because `isRunning` on the service goes false between days of a batch and
+    /// wouldn't redraw this view anyway — a second click mid-backfill would collide.
+    @State private var isBackfilling = false
 
     var body: some View {
         ScrollView {
@@ -18,10 +22,12 @@ struct InsightsView: View {
                 if !APIKeyStore.hasKey(for: LLMSettings.activeProvider) {
                     noKeyBanner
                 }
-                if let error = state.analysis?.lastError {
-                    banner(error, systemImage: "exclamationmark.triangle.fill", tint: .orange)
-                }
-                if let status = statusMessage {
+                // Observed through a child view: this view watches AppState, and AppState
+                // only republishes when the service *reference* changes — its @Published
+                // properties would never redraw anything from here.
+                if let analysis = state.analysis {
+                    AnalysisStatusBanners(analysis: analysis, statusMessage: statusMessage)
+                } else if let status = statusMessage {
                     banner(status, systemImage: "info.circle.fill", tint: .blue)
                 }
                 if let dry = dryRun {
@@ -59,6 +65,16 @@ struct InsightsView: View {
             Menu {
                 Button("Analyze yesterday") { run(dayOffset: -1) }
                 Button("Analyze today so far") { run(dayOffset: 0) }
+                if !weekBacklog.isEmpty {
+                    Divider()
+                    Section("Backfill a week") {
+                        ForEach(weekBacklog) { week in
+                            Button("\(week.label) — \(week.pendingDays.count) day\(week.pendingDays.count == 1 ? "" : "s")") {
+                                runWeek(week)
+                            }
+                        }
+                    }
+                }
                 Divider()
                 Button("Preview yesterday (dry run, no API)") { preview(dayOffset: -1) }
                 Button("Preview today (dry run, no API)") { preview(dayOffset: 0) }
@@ -67,7 +83,7 @@ struct InsightsView: View {
             }
             .menuStyle(.borderlessButton)
             .frame(width: 90)
-            .disabled(state.analysis?.isRunning == true)
+            .disabled(state.analysis?.isRunning == true || isBackfilling)
         }
     }
 
@@ -236,6 +252,17 @@ struct InsightsView: View {
                systemImage: "key.fill", tint: .orange)
     }
 
+    fileprivate static func bannerView(_ text: String, systemImage: String, tint: Color) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: systemImage).foregroundStyle(tint)
+            Text(text).font(.system(size: 12))
+            Spacer()
+        }
+        .padding(10)
+        .background(tint.opacity(0.12))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
     private func banner(_ text: String, systemImage: String, tint: Color) -> some View {
         HStack(spacing: 8) {
             Image(systemName: systemImage).foregroundStyle(tint)
@@ -260,6 +287,27 @@ struct InsightsView: View {
         digests = analysis.analysisStore.recentDigests()
         observations = analysis.analysisStore.allObservations()
         questions = analysis.analysisStore.openQuestions()
+        // Scans the frame table, so it stays off the main thread and lands when it lands.
+        Task { weekBacklog = await analysis.weeksNeedingAnalysis() }
+    }
+
+    private func runWeek(_ week: AnalysisService.WeekBacklog) {
+        guard !isBackfilling else { return }
+        dryRun = nil
+        isBackfilling = true
+        statusMessage = "Backfilling \(week.label)…"
+        Task {
+            let analyzed = await state.analysis?.analyzeWeek(year: week.year, week: week.week) ?? []
+            isBackfilling = false
+            if !analyzed.isEmpty {
+                statusMessage = "Analyzed \(analyzed.count) day(s) of \(week.label): \(analyzed.joined(separator: ", "))"
+            } else if state.analysis?.lastError != nil {
+                statusMessage = "\(week.label) failed — see the error above."
+            } else {
+                statusMessage = "\(week.label) had nothing left to analyze."
+            }
+            reload()
+        }
     }
 
     private func run(dayOffset: Int) {
@@ -275,11 +323,14 @@ struct InsightsView: View {
 
     private func preview(dayOffset: Int) {
         guard let date = Calendar.current.date(byAdding: .day, value: dayOffset, to: Date()) else { return }
-        do {
-            dryRun = try state.analysis?.dryRun(date: date)
-            statusMessage = nil
-        } catch {
-            statusMessage = "Dry run failed: \(error)"
+        statusMessage = "Compacting…" // a day's worth of OCR text takes a few seconds
+        Task {
+            do {
+                dryRun = try await state.analysis?.dryRun(date: date)
+                statusMessage = nil
+            } catch {
+                statusMessage = "Dry run failed: \(error)"
+            }
         }
     }
 }
@@ -341,8 +392,9 @@ private struct QuestionCard: View {
         .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(.blue.opacity(0.25), lineWidth: 1))
         .clipShape(RoundedRectangle(cornerRadius: 10))
         .task {
+            // main.db is shared with the capture pipeline — read it off the main actor.
             guard let fid = question.frameID, let store = state.store,
-                  let frame = (try? store.frameByID(fid)) ?? nil else { return }
+                  let frame = await store.read({ (try? $0.frameByID(fid)) ?? nil }) else { return }
             thumbnail = await state.frameExtractor.image(for: frame)
         }
     }
@@ -357,6 +409,25 @@ private struct QuestionCard: View {
         let formatter = DateFormatter()
         formatter.dateFormat = "HH:mm"
         return formatter.string(from: Date(timeIntervalSince1970: ts))
+    }
+}
+
+/// Owns the observation of `AnalysisService` so its `@Published` state actually redraws.
+private struct AnalysisStatusBanners: View {
+    @ObservedObject var analysis: AnalysisService
+    let statusMessage: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if let error = analysis.lastError {
+                InsightsView.bannerView(error, systemImage: "exclamationmark.triangle.fill", tint: .orange)
+            }
+            if let progress = analysis.batchProgress {
+                InsightsView.bannerView(progress, systemImage: "hourglass", tint: .blue)
+            } else if let statusMessage {
+                InsightsView.bannerView(statusMessage, systemImage: "info.circle.fill", tint: .blue)
+            }
+        }
     }
 }
 
@@ -499,8 +570,6 @@ private struct AdoptedCard: View {
     }
 
     private static func day(_ ts: Double) -> String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd"
-        return formatter.string(from: Date(timeIntervalSince1970: ts))
+        return DayLabel.string(from: Date(timeIntervalSince1970: ts))
     }
 }

@@ -114,13 +114,17 @@ final class Store {
     }
 
     /// Frames whose PNG can be deleted: encoded AND already OCR'd (OCR gates deletion so text isn't lost).
-    func framesReadyForScreenshotDeletion() throws -> [Frame] {
+    /// Batched — the task reruns every `screenshotCleanupInterval`, so a backlog still drains,
+    /// but no single run can hold the shared database queue for an unbounded time.
+    func framesReadyForScreenshotDeletion(limit: Int = K.screenshotCleanupBatchSize) throws -> [Frame] {
         try db.query(
             """
             SELECT * FROM frame
             WHERE encodeStatus = 2 AND imgFilename IS NOT NULL
               AND EXISTS (SELECT 1 FROM recognition_data WHERE recognition_data.frameID = frame.id)
-            """
+            ORDER BY createdAt
+            LIMIT ?
+            """, [limit]
         ).compactMap(frame(from:))
     }
 
@@ -142,7 +146,7 @@ final class Store {
         ).compactMap(frame(from:))
     }
 
-    func insertRecognition(frameID: Int64, dataJSON: String, text: String) throws {
+    func insertRecognition(frameID: Int64, dataJSON: String?, text: String) throws {
         try db.execute(
             "INSERT INTO recognition_data (frameID, data, text) VALUES (?, ?, ?)",
             [frameID, dataJSON, text])
@@ -321,6 +325,30 @@ final class Store {
         ).compactMap { $0.string("videoPath") }
     }
 
+    /// Distinct local days that still have frames — the days analysis can still be run on,
+    /// since retention eventually takes the OCR text with the frames.
+    func recordedDays() throws -> [String] {
+        try db.query(
+            "SELECT DISTINCT date(createdAt, 'unixepoch', 'localtime') AS day FROM frame ORDER BY day DESC"
+        ).compactMap { $0.string("day") }
+    }
+
+    /// Videos whose last frame predates `cutoff`, with that timestamp — the caller needs it
+    /// to work out which day a video belongs to.
+    func videosLastSeenBefore(_ cutoff: Double) throws -> [(path: String, lastAt: Double)] {
+        try db.query(
+            """
+            SELECT videoPath, MAX(createdAt) AS lastAt FROM frame
+            WHERE videoPath IS NOT NULL
+            GROUP BY videoPath
+            HAVING MAX(createdAt) < ?
+            """, [cutoff]
+        ).compactMap { row in
+            guard let path = row.string("videoPath"), let lastAt = row.double("lastAt") else { return nil }
+            return (path: path, lastAt: lastAt)
+        }
+    }
+
     func clearVideoReferences(videoPath: String) throws {
         try db.execute(
             "UPDATE frame SET videoPath = NULL, videoFrameIndex = NULL WHERE videoPath = ?", [videoPath])
@@ -344,17 +372,51 @@ final class Store {
         }
     }
 
-    func deleteOrphanedFrames(cutoff: Double) throws {
-        try db.transaction { exec, query in
-            let ids = try query(
-                "SELECT id FROM frame WHERE createdAt < ? AND videoPath IS NULL AND imgFilename IS NULL",
-                [cutoff]
-            ).compactMap { $0.int("id") }
-            for id in ids {
-                _ = try exec("DELETE FROM recognition_data WHERE frameID = ?", [id])
-                _ = try exec("DELETE FROM frame WHERE id = ?", [id])
+    /// Deleted in batches, one transaction each, so a sweep cut short by quit keeps the work
+    /// it already committed instead of rolling all of it back and starting over next launch.
+    func deleteOrphanedFrames(cutoff: Double, batchSize: Int = 500) throws {
+        while true {
+            let deleted = try db.transaction { exec, query -> Int in
+                let ids = try query(
+                    """
+                    SELECT id FROM frame
+                    WHERE createdAt < ? AND videoPath IS NULL AND imgFilename IS NULL
+                    LIMIT ?
+                    """, [cutoff, batchSize]
+                ).compactMap { $0.int("id") }
+                for id in ids {
+                    _ = try exec("DELETE FROM recognition_data WHERE frameID = ?", [id])
+                    _ = try exec("DELETE FROM frame WHERE id = ?", [id])
+                }
+                return ids.count
             }
-            return ()
+            if deleted < batchSize { return }
+        }
+    }
+}
+
+// MARK: - Off-main access
+
+// `SQLiteDB` funnels every call through its own serial queue, so a `Store` is already safe
+// to use from any thread — these conformances state that explicitly.
+extension SQLiteDB: @unchecked Sendable {}
+extension Store: @unchecked Sendable {}
+
+extension Store {
+    /// A dedicated thread for these reads rather than the Swift concurrency pool: the work
+    /// blocks inside SQLiteDB's queue, and parking cooperative threads that way can starve
+    /// the pool when a query is slow.
+    private static let readQueue = DispatchQueue(label: "kaze.db.read", qos: .userInitiated)
+
+    /// Runs a read away from the calling thread.
+    ///
+    /// Every `Store` call blocks its thread until the shared database queue is free, so
+    /// calling one directly from a `@MainActor` model freezes the entire app for as long as
+    /// whatever the background pipeline is doing takes. Awaiting this instead lets the main
+    /// actor suspend: the window keeps drawing and simply fills in when the read lands.
+    func read<T: Sendable>(_ body: @escaping @Sendable (Store) -> T) async -> T {
+        await withCheckedContinuation { continuation in
+            Self.readQueue.async { continuation.resume(returning: body(self)) }
         }
     }
 }

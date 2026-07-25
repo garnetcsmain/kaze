@@ -4,6 +4,11 @@ import Foundation
 /// ~/Library/Application Support/Kaze/Record Data/{main.db, recordings/, audio/, logs/, temp/screenshots/}
 enum Paths {
     static let dataDir: URL = {
+        // $KAZE_DATA_DIR points the whole app at a different history — used to try changes
+        // against a copy of a real recording set without risking the live one.
+        if let override = ProcessInfo.processInfo.environment["KAZE_DATA_DIR"], !override.isEmpty {
+            return URL(fileURLWithPath: override, isDirectory: true)
+        }
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         return appSupport.appendingPathComponent("Kaze/Record Data", isDirectory: true)
     }()

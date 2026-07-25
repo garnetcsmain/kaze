@@ -18,6 +18,8 @@ final class AppState: ObservableObject {
     @Published var audioRecording: Bool
     @Published var bootError: String?
     @Published var isReady = false
+    /// True while the one-time index build runs over an existing history (Schema.ensureIndexes).
+    @Published var preparingDatabase = false
 
     private(set) var db: SQLiteDB?
     private(set) var store: Store?
@@ -48,19 +50,40 @@ final class AppState: ObservableObject {
     func bootstrap() async {
         Paths.ensureDirectories()
 
-        let db: SQLiteDB
-        do {
-            db = try Schema.open()
-        } catch {
-            bootError = "\(error)"
-            Log.error("Database init failed: \(error)")
+        // Opening, indexing and crash recovery all happen off the main actor. The first
+        // launch after indexes were introduced has to build them across the whole history,
+        // and every SQLiteDB call blocks its thread — doing this inline would beachball the
+        // app before it finished starting. Indexes must exist before the scheduler runs:
+        // its OCR and cleanup queries are the ones that need them.
+        preparingDatabase = true
+        let outcome = await Task.detached(priority: .userInitiated) { () -> (db: SQLiteDB?, error: String?) in
+            let db: SQLiteDB
+            do {
+                db = try Schema.open()
+            } catch {
+                return (nil, "\(error)")
+            }
+            // Maintenance only makes the database faster — never fail startup over it.
+            do {
+                try Schema.ensureIndexes(db)
+                try Schema.ensureFastSearchDeletes(db)
+            } catch {
+                Log.error("Database maintenance failed (continuing anyway): \(error)")
+            }
+            try? Store(db: db).resetStuckWork() // recover tasks stranded by a previous crash
+            return (db, nil)
+        }.value
+        preparingDatabase = false
+
+        guard let db = outcome.db else {
+            let message = outcome.error ?? "unknown error"
+            bootError = message
+            Log.error("Database init failed: \(message)")
             return
         }
         self.db = db
         let store = Store(db: db)
         self.store = store
-
-        try? store.resetStuckWork() // recover tasks stranded by a previous crash
 
         let screenshot = ScreenshotService(store: store)
         let encoding = EncodingService(store: store)
@@ -110,7 +133,6 @@ final class AppState: ObservableObject {
         }
         scheduler.start()
 
-        Task.detached(priority: .utility) { retention.cleanupOldRecordings() }
         if audioRecording {
             await audio.start()
         } else {
@@ -119,14 +141,19 @@ final class AppState: ObservableObject {
 
         // Phase 2: daily AI analysis. Independent of capture — runs even if the API key
         // isn't set yet (it just no-ops until one is added in Settings).
+        // Set up before the retention sweep below, which asks it which days are analyzed.
         do {
             let analysis = try AnalysisService(store: store, frameExtractor: frameExtractor)
             self.analysis = analysis
+            let analysisStore = analysis.analysisStore
+            retention.hasDigest = { analysisStore.hasDigest(day: $0) }
             analysis.requestNotificationPermission()
             startAnalysisTimer()
         } catch {
             Log.error("Analysis service init failed: \(error)")
         }
+
+        Task.detached(priority: .utility) { retention.cleanupOldRecordings() }
 
         isReady = true
         Log.info("Kaze started (native)")

@@ -24,6 +24,8 @@ final class RewindModel: ObservableObject {
 
     private var searchTask: Task<Void, Never>?
     private var imageLoadTask: Task<Void, Never>?
+    private var loadTask: Task<Void, Never>?
+    private var transcriptTask: Task<Void, Never>?
     private var loadingMore = false
     private var lastTranscriptCenter: Double?
     private var lastWheelNavigation = Date.distantPast
@@ -37,15 +39,25 @@ final class RewindModel: ObservableObject {
 
     // MARK: - Timeline loading
 
+    // Every query below goes through `store.read`, which runs it off the main thread. The
+    // database queue is shared with the capture pipeline, so reading it inline would freeze
+    // the window for as long as the pipeline's current query takes.
+
     func loadInitial() {
         guard let store else { return }
-        do {
-            frames = try store.timeline(limit: 50)
-            currentIndex = 0
-            displayCurrentFrame()
-            refreshTranscriptsIfNeeded(force: true)
-        } catch {
-            Log.error("Timeline load failed: \(error)")
+        loadTask?.cancel()
+        loadTask = Task { [weak self] in
+            let loaded = await store.read { store -> [Frame] in
+                do { return try store.timeline(limit: 50) } catch {
+                    Log.error("Timeline load failed: \(error)")
+                    return []
+                }
+            }
+            guard let self, !Task.isCancelled else { return }
+            self.frames = loaded
+            self.currentIndex = 0
+            self.displayCurrentFrame()
+            self.refreshTranscriptsIfNeeded(force: true)
         }
     }
 
@@ -88,14 +100,17 @@ final class RewindModel: ObservableObject {
         guard !loadingMore, currentIndex >= frames.count - 10,
               let store, let lastID = frames.last?.id else { return }
         loadingMore = true
-        defer { loadingMore = false }
-        do {
-            let more = try store.timeline(limit: 50, untilID: lastID)
-            if !more.isEmpty {
-                frames.append(contentsOf: more)
+        Task { [weak self] in
+            let more = await store.read { store -> [Frame] in
+                do { return try store.timeline(limit: 50, untilID: lastID) } catch {
+                    Log.error("Timeline pagination failed: \(error)")
+                    return []
+                }
             }
-        } catch {
-            Log.error("Timeline pagination failed: \(error)")
+            guard let self else { return }
+            self.loadingMore = false
+            guard !Task.isCancelled, !more.isEmpty else { return }
+            self.frames.append(contentsOf: more)
         }
     }
 
@@ -172,14 +187,14 @@ final class RewindModel: ObservableObject {
         searchTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 300_000_000) // debounce
             guard !Task.isCancelled, let self, let store = self.store else { return }
-            do {
-                let hits = try store.search(query, limit: 20)
-                guard !Task.isCancelled else { return }
-                self.searchResults = hits
-            } catch {
-                Log.error("Search failed: \(error)")
-                self.searchResults = []
+            let hits = await store.read { store -> [SearchHit] in
+                do { return try store.search(query, limit: 20) } catch {
+                    Log.error("Search failed: \(error)")
+                    return []
+                }
             }
+            guard !Task.isCancelled else { return }
+            self.searchResults = hits
             self.isSearching = false
         }
     }
@@ -198,33 +213,37 @@ final class RewindModel: ObservableObject {
     /// which could only snap to the nearest already-loaded frame).
     func jump(toTimestamp timestamp: Double) {
         guard let store else { return }
-        do {
-            let newer = try store.db.query(
-                "SELECT * FROM frame WHERE createdAt > ? ORDER BY createdAt ASC LIMIT 25", [timestamp])
-            let older = try store.db.query(
-                "SELECT * FROM frame WHERE createdAt <= ? ORDER BY createdAt DESC LIMIT 50", [timestamp])
-
-            func toFrame(_ row: SQLRow) -> Frame? {
-                guard let id = row.int("id"), let createdAt = row.double("createdAt") else { return nil }
-                return Frame(
-                    id: id, createdAt: createdAt,
-                    imgFilename: row.string("imgFilename"),
-                    videoPath: row.string("videoPath"),
-                    videoFrameIndex: row.int("videoFrameIndex"),
-                    encodeStatus: row.int("encodeStatus") ?? 0)
+        loadTask?.cancel()
+        loadTask = Task { [weak self] in
+            let combined = await store.read { store -> [Frame] in
+                func toFrame(_ row: SQLRow) -> Frame? {
+                    guard let id = row.int("id"), let createdAt = row.double("createdAt") else { return nil }
+                    return Frame(
+                        id: id, createdAt: createdAt,
+                        imgFilename: row.string("imgFilename"),
+                        videoPath: row.string("videoPath"),
+                        videoFrameIndex: row.int("videoFrameIndex"),
+                        encodeStatus: row.int("encodeStatus") ?? 0)
+                }
+                do {
+                    let newer = try store.db.query(
+                        "SELECT * FROM frame WHERE createdAt > ? ORDER BY createdAt ASC LIMIT 25", [timestamp])
+                    let older = try store.db.query(
+                        "SELECT * FROM frame WHERE createdAt <= ? ORDER BY createdAt DESC LIMIT 50", [timestamp])
+                    return Array(newer.compactMap(toFrame).reversed() + older.compactMap(toFrame))
+                } catch {
+                    Log.error("Jump to timestamp failed: \(error)")
+                    return []
+                }
             }
-
-            let combined = newer.compactMap(toFrame).reversed() + older.compactMap(toFrame)
-            guard !combined.isEmpty else { return }
-            frames = Array(combined)
+            guard let self, !Task.isCancelled, !combined.isEmpty else { return }
+            self.frames = combined
             // Land on the frame nearest the target timestamp.
-            currentIndex = frames.enumerated().min {
+            self.currentIndex = combined.enumerated().min {
                 abs($0.element.createdAt - timestamp) < abs($1.element.createdAt - timestamp)
             }?.offset ?? 0
-            displayCurrentFrame()
-            refreshTranscriptsIfNeeded(force: true)
-        } catch {
-            Log.error("Jump to timestamp failed: \(error)")
+            self.displayCurrentFrame()
+            self.refreshTranscriptsIfNeeded(force: true)
         }
     }
 
@@ -243,10 +262,16 @@ final class RewindModel: ObservableObject {
         let center = frame.createdAt
         if !force, let last = lastTranscriptCenter, abs(center - last) < 30 { return }
         lastTranscriptCenter = center
-        do {
-            transcripts = try store.transcriptions(from: center - 300, to: center + 300)
-        } catch {
-            Log.error("Transcript fetch failed: \(error)")
+        transcriptTask?.cancel()
+        transcriptTask = Task { [weak self] in
+            let segments = await store.read { store -> [TranscriptionSegment] in
+                do { return try store.transcriptions(from: center - 300, to: center + 300) } catch {
+                    Log.error("Transcript fetch failed: \(error)")
+                    return []
+                }
+            }
+            guard let self, !Task.isCancelled else { return }
+            self.transcripts = segments
         }
     }
 

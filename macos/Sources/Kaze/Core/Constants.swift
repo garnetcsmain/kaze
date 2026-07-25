@@ -23,9 +23,25 @@ enum K {
     // OCR
     static let ocrBatchSize = 25
 
+    /// Whether to keep the per-line bounding boxes Vision returns, in `recognition_data.data`.
+    /// Nothing reads them today and they cost roughly 8x the recognized text itself — 1.24 GB
+    /// of a 1.8 GB database over 12 days. Turn back on if a feature ever needs to point at
+    /// where on screen a search hit was.
+    static let storeOCRBoundingBoxes = false
+
+    /// Screenshots deleted per cleanup run. Bounded so one run can't monopolize the
+    /// database queue that the UI also reads through.
+    static let screenshotCleanupBatchSize = 200
+
     // Retention
     static let retentionDays: Double = 14
     static var retentionSeconds: TimeInterval { retentionDays * 24 * 3600 }
+
+    /// How long a day stays scrubbable in the rewind timeline after it has been analyzed.
+    /// Past this, a digested day's videos are deleted early — the digest, the OCR text and
+    /// the search index all outlive them, so only the imagery is lost. Days with no digest
+    /// are never touched here; they wait for the full `retentionDays` window.
+    static let videoDigestGraceDays: Double = 7
 
     // Scheduler
     static let cpuLowPowerThreshold = 0.75 // LOW_POWER tasks deferred at >=75% CPU

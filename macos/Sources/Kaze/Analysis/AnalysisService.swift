@@ -10,6 +10,8 @@ final class AnalysisService: ObservableObject {
     @Published private(set) var isRunning = false
     @Published private(set) var lastError: String?
     @Published private(set) var lastRunDay: String?
+    /// Set while a multi-day backfill is walking a week, e.g. "Analyzing 2026-07-18 (2 of 5)…".
+    @Published private(set) var batchProgress: String?
 
     private let store: Store
     let analysisStore: AnalysisStore
@@ -50,9 +52,19 @@ final class AnalysisService: ObservableObject {
         let preview: String
     }
 
+    /// Compacting a day reads all of its OCR text and then runs CPU-bound segmentation over
+    /// it — seconds of work. This service is `@MainActor`, so it has to be pushed off
+    /// explicitly; otherwise the 15-minute timer freezes the app with no window even open.
+    private func compacted(for date: Date) async throws -> DayCompactor.DayData {
+        let compactor = self.compactor
+        return try await Task.detached(priority: .userInitiated) {
+            try compactor.compact(for: date)
+        }.value
+    }
+
     /// Builds the compacted prompt without calling the API — lets you inspect volume/cost.
-    func dryRun(date: Date) throws -> DryRunResult {
-        let data = try compactor.compact(for: date)
+    func dryRun(date: Date) async throws -> DryRunResult {
+        let data = try await compacted(for: date)
         let prompt = DayCompactor.renderPrompt(data)
         return DryRunResult(
             day: data.day, promptChars: prompt.count, approxTokens: prompt.count / 4,
@@ -75,7 +87,7 @@ final class AnalysisService: ObservableObject {
         }
 
         do {
-            let data = try compactor.compact(for: date)
+            let data = try await compacted(for: date)
             guard !data.segments.isEmpty else {
                 lastError = "No recorded activity for \(data.day)."
                 return nil
@@ -134,6 +146,18 @@ final class AnalysisService: ObservableObject {
                 }
             }
 
+            // Machine-readable feed for other systems (also one-way, also non-fatal).
+            // Rewritten in full, so it picks up the day just stored along with any earlier
+            // day that has since been re-analyzed.
+            if FeedExporter.isEnabled {
+                do {
+                    let urls = try FeedExporter.export(store: analysisStore)
+                    Log.info("Feed: wrote \(urls.count) file(s)")
+                } catch {
+                    Log.error("Feed export failed: \(error)")
+                }
+            }
+
             if notify {
                 postNotification(for: digest)
             }
@@ -144,6 +168,110 @@ final class AnalysisService: ObservableObject {
             Log.error("Analysis failed: \(error)")
             return nil
         }
+    }
+
+    // MARK: - Backfill by calendar week
+
+    /// ISO-8601 weeks, in the local time zone — weeks start Monday and belong to the year
+    /// containing their Thursday, which is why the year here is `yearForWeekOfYear` and not
+    /// simply the calendar year.
+    /// `.autoupdatingCurrent`, not `.current`: this is a `static let`, so a snapshot would
+    /// freeze at first touch and stop agreeing with `DayLabel` and SQLite the moment the
+    /// system time zone changed — and a menu-bar app runs for weeks at a time.
+    static let isoCalendar: Calendar = {
+        var calendar = Calendar(identifier: .iso8601)
+        calendar.timeZone = .autoupdatingCurrent
+        return calendar
+    }()
+
+    struct WeekBacklog: Identifiable {
+        let year: Int
+        let week: Int
+        let pendingDays: [String]
+        var label: String { String(format: "%d-W%02d", year, week) }
+        var id: String { label }
+    }
+
+    /// The seven dates of an ISO week, Monday first. Empty if that week doesn't exist.
+    ///
+    /// `Calendar.date(from:)` normalizes rather than rejecting, so it happily answers for
+    /// week 0, week 99, or week 53 of a 52-week year by rolling into a neighbouring year.
+    /// Silently analyzing a different week than the caller asked for is worse than doing
+    /// nothing, so the result is round-tripped and discarded if it doesn't match.
+    static func days(inISOWeek year: Int, week: Int) -> [Date] {
+        var components = DateComponents()
+        components.yearForWeekOfYear = year
+        components.weekOfYear = week
+        components.weekday = isoCalendar.firstWeekday
+        guard week >= 1, week <= 53, let start = isoCalendar.date(from: components),
+              isoWeek(of: start) == (year, week)
+        else { return [] }
+        return (0..<7).compactMap { isoCalendar.date(byAdding: .day, value: $0, to: start) }
+    }
+
+    static func isoWeek(of date: Date) -> (year: Int, week: Int) {
+        (isoCalendar.component(.yearForWeekOfYear, from: date),
+         isoCalendar.component(.weekOfYear, from: date))
+    }
+
+    /// ISO weeks that still hold recorded days with no digest, newest first.
+    ///
+    /// Today is never listed: analyzing a day that isn't over yet would store a digest for a
+    /// partial day, and the nightly run skips any day that already has one — so the complete
+    /// version would never be generated.
+    func weeksNeedingAnalysis() async -> [WeekBacklog] {
+        let recorded = await store.read { (try? $0.recordedDays()) ?? [] }
+        let today = DayLabel.today
+
+        var pendingByWeek: [String: (year: Int, week: Int, days: [String])] = [:]
+        for day in recorded where day != today {
+            guard !analysisStore.hasDigest(day: day),
+                  let date = DayLabel.date(from: day) else { continue }
+            let (year, week) = Self.isoWeek(of: date)
+            let key = String(format: "%d-W%02d", year, week)
+            pendingByWeek[key, default: (year, week, [])].days.append(day)
+        }
+
+        return pendingByWeek.values
+            .map { WeekBacklog(year: $0.year, week: $0.week, pendingDays: $0.days.sorted()) }
+            .sorted { ($0.year, $0.week) > ($1.year, $1.week) }
+    }
+
+    /// Analyzes every day of an ISO week that has activity and no digest yet, oldest first —
+    /// the ledger's "seen on N distinct days" rule reads days in order, so backfilling out of
+    /// order would confirm patterns on the wrong date.
+    @discardableResult
+    func analyzeWeek(year: Int, week: Int) async -> [String] {
+        let recorded = Set(await store.read { (try? $0.recordedDays()) ?? [] })
+        let today = DayLabel.today
+        let candidates = Self.days(inISOWeek: year, week: week)
+            .map { (date: $0, label: DayLabel.string(from: $0)) }
+            .filter { recorded.contains($0.label) && $0.label != today && !analysisStore.hasDigest(day: $0.label) }
+
+        guard !candidates.isEmpty else { return [] }
+        var analyzed: [String] = []
+        var consecutiveFailures = 0
+        defer { batchProgress = nil } // never leave the banner stuck if this is cancelled
+
+        for (index, candidate) in candidates.enumerated() {
+            batchProgress = "Analyzing \(candidate.label) (\(index + 1) of \(candidates.count))…"
+            if await analyze(date: candidate.date, notify: false) != nil {
+                analyzed.append(candidate.label)
+                consecutiveFailures = 0
+                continue
+            }
+            // A single failure is usually specific to that day — most often "No recorded
+            // activity", when the day's frames were captured but never OCR'd. Keep going.
+            // Two in a row means something global (no key, no credit, provider down), and
+            // each further attempt costs a full day compaction before it fails.
+            consecutiveFailures += 1
+            if consecutiveFailures >= 2 {
+                Log.info("Week backfill: stopping after 2 consecutive failures — \(lastError ?? "unknown")")
+                break
+            }
+        }
+        Log.info("Week backfill \(String(format: "%d-W%02d", year, week)): analyzed \(analyzed.count) of \(candidates.count) day(s)")
+        return analyzed
     }
 
     // MARK: - Vision sampling
@@ -171,7 +299,7 @@ final class AnalysisService: ObservableObject {
         var sampled: [(segment: ActivitySegment, frameID: Int64, jpeg: Data)] = []
         for seg in ambiguous {
             guard let fid = seg.representativeFrameID,
-                  let frame = try? store.frameByID(fid),
+                  let frame = await store.read({ try? $0.frameByID(fid) }) ?? nil,
                   let jpeg = await FrameJPEG.data(for: frame, extractor: frameExtractor)
             else { continue }
             sampled.append((seg, fid, jpeg))

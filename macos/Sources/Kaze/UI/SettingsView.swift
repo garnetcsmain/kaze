@@ -16,6 +16,9 @@ struct SettingsView: View {
     @State private var journalEnabled = JournalExporter.isEnabled
     @State private var journalPath = JournalExporter.path
     @State private var journalStatus: String?
+    @State private var feedEnabled = FeedExporter.isEnabled
+    @State private var feedPath = FeedExporter.path
+    @State private var feedStatus: String?
 
     var body: some View {
         VStack(spacing: 20) {
@@ -180,6 +183,45 @@ struct SettingsView: View {
             }
             .padding(.horizontal, 20)
 
+            GroupBox("Insights feed (JSONL)") {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack {
+                        Toggle("Write a machine-readable feed", isOn: $feedEnabled)
+                            .toggleStyle(.switch)
+                            .disabled(feedPath == nil)
+                            .onChange(of: feedEnabled) { _, on in FeedExporter.isEnabled = on }
+                        Spacer()
+                    }
+
+                    HStack(spacing: 8) {
+                        Text(feedPath.map { ($0 as NSString).abbreviatingWithTildeInPath } ?? "No folder selected")
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(feedPath == nil ? .secondary : .primary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Spacer()
+                        Button("Choose Folder…") { chooseFeedFolder() }
+                            .controlSize(.small)
+                    }
+
+                    HStack {
+                        Button("Write feed now") { exportFeed() }
+                            .controlSize(.small)
+                            .disabled(feedPath == nil)
+                        if let status = feedStatus {
+                            Text(status).font(.system(size: 10)).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                    }
+
+                    Text("Writes \(FeedExporter.insightsFilename) (one record per analyzed day), \(FeedExporter.observationsFilename) (one per tracked behavior) and \(FeedExporter.questionsFilename) (unclear activity and your explanations). Join them on the observation key. All three are rewritten in full each time, so re-analyzing a day replaces its record rather than duplicating it.")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                }
+                .padding(6)
+            }
+            .padding(.horizontal, 20)
+
             VStack(spacing: 4) {
                 Text("Open source under GPL 3.0 — based on OpenRewind")
                     .font(.system(size: 11))
@@ -223,6 +265,35 @@ struct SettingsView: View {
         panel.message = "Choose a folder inside your Obsidian vault for Kaze's journal notes."
         if panel.runModal() == .OK, let url = panel.url {
             setJournalPath(url.path)
+        }
+    }
+
+    private func chooseFeedFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.prompt = "Use Folder"
+        panel.message = "Choose a folder for Kaze's JSONL insight feed."
+        if panel.runModal() == .OK, let url = panel.url {
+            FeedExporter.path = url.path
+            feedPath = url.path
+            FeedExporter.isEnabled = true
+            feedEnabled = true
+            feedStatus = nil
+        }
+    }
+
+    private func exportFeed() {
+        guard let analysisStore = state.analysis?.analysisStore else {
+            feedStatus = "Analysis service not ready."
+            return
+        }
+        do {
+            let urls = try FeedExporter.export(store: analysisStore)
+            feedStatus = "Wrote \(urls.count) file(s)."
+        } catch {
+            feedStatus = "Feed export failed: \(error.localizedDescription)"
         }
     }
 

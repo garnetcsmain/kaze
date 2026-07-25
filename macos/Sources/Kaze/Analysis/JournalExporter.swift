@@ -218,12 +218,10 @@ enum JournalExporter {
         """
         var appended = 0
 
-        let dayFmt = DateFormatter()
-        dayFmt.dateFormat = "yyyy-MM-dd"
         for obs in confirmed {
             let anchor = "<!-- kaze:\(obs.key) -->"
             guard content.contains(anchor) == false else { continue }
-            let day = dayFmt.string(from: Date(timeIntervalSince1970: obs.lastSeen))
+            let day = DayLabel.string(from: Date(timeIntervalSince1970: obs.lastSeen))
             content += "\n- [ ] **\(obs.behavior)** — \(obs.suggestion) *(confirmed \(day), seen \(obs.daysSeen)d)* \(anchor)"
             if let implementation = obs.implementation, !implementation.isEmpty {
                 content += "\n" + implementationLines(implementation, category: obs.implementationCategory,

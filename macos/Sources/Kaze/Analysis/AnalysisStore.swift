@@ -3,7 +3,7 @@ import Foundation
 /// Persistent home for the observations ledger and daily digests.
 /// Uses a SEPARATE analysis.db so the shared v4 main.db (also read by the Electron app)
 /// is never modified. Cloud sync (phase 3) will push from these tables, not raw recordings.
-final class AnalysisStore {
+final class AnalysisStore: @unchecked Sendable { // its SQLiteDB serializes all access
     let db: SQLiteDB
 
     static var dbFile: URL { Paths.dataDir.appendingPathComponent("analysis.db") }
@@ -57,6 +57,21 @@ final class AnalysisStore {
                 UNIQUE(day, ts)
             )
             """)
+        // Which days each behavior actually appeared on. `observation.daysSeen` used to be a
+        // counter bumped on every merge, which was fine while every day was analyzed exactly
+        // once — but week backfill and "Analyze today so far" both re-merge a day, and each
+        // re-merge inflated the count and could confirm a pattern that was only ever seen
+        // once. Counting distinct rows here makes a re-merge idempotent.
+        try db.execute("""
+            CREATE TABLE IF NOT EXISTS observation_day (
+                observationKey TEXT NOT NULL,
+                day TEXT NOT NULL,
+                frequency INTEGER DEFAULT 0,
+                PRIMARY KEY (observationKey, day)
+            ) WITHOUT ROWID
+            """)
+        try seedObservationDaysIfNeeded()
+
         // Added after initial release — ALTER fails harmlessly (via try?) once the column
         // already exists, so this doubles as the migration for existing analysis.db files.
         _ = try? db.execute("ALTER TABLE observation ADD COLUMN implementation TEXT")
@@ -65,6 +80,31 @@ final class AnalysisStore {
         _ = try? db.execute("ALTER TABLE observation ADD COLUMN resolution TEXT")
         _ = try? db.execute("ALTER TABLE observation ADD COLUMN resolutionReason TEXT")
         _ = try? db.execute("ALTER TABLE observation ADD COLUMN resolutionAt REAL")
+    }
+
+    /// Carries an existing ledger onto the observation_day table. The days a pre-existing
+    /// entry was seen on weren't recorded anywhere, so its historical count is preserved as
+    /// that many placeholder rows — they can never collide with a real `YYYY-MM-DD`, so a
+    /// day analyzed from here on still counts exactly once.
+    private func seedObservationDaysIfNeeded() throws {
+        let alreadySeeded = ((try? db.query("SELECT 1 FROM observation_day LIMIT 1")) ?? []).isEmpty == false
+        guard !alreadySeeded else { return }
+
+        let rows = try db.query("SELECT key, daysSeen, totalFrequency FROM observation")
+        guard !rows.isEmpty else { return }
+        for row in rows {
+            guard let key = row.string("key") else { continue }
+            let days = max(1, Int(row.int("daysSeen") ?? 1))
+            let total = Int(row.int("totalFrequency") ?? 0)
+            for index in 0..<days {
+                // Spread the historical total over the placeholders so SUM still matches.
+                let share = total / days + (index < total % days ? 1 : 0)
+                try db.execute(
+                    "INSERT OR IGNORE INTO observation_day (observationKey, day, frequency) VALUES (?, ?, ?)",
+                    [key, "legacy-\(index)", share])
+            }
+        }
+        Log.info("Analysis ledger: recorded per-day history for \(rows.count) existing observation(s)")
     }
 
     // MARK: - Digests
@@ -120,12 +160,22 @@ final class AnalysisStore {
             let key = Self.normalize(obs.behavior)
             guard !key.isEmpty else { continue }
 
+            // Re-analyzing a day replaces that day's contribution rather than adding to it.
+            try db.execute("""
+                INSERT INTO observation_day (observationKey, day, frequency) VALUES (?, ?, ?)
+                ON CONFLICT(observationKey, day) DO UPDATE SET frequency = excluded.frequency
+                """, [key, day, obs.frequency])
+            let daysSeen = Int(try db.query(
+                "SELECT COUNT(*) AS c FROM observation_day WHERE observationKey = ?", [key])
+                .first?.int("c") ?? 1)
+            let total = Int(try db.query(
+                "SELECT COALESCE(SUM(frequency), 0) AS s FROM observation_day WHERE observationKey = ?", [key])
+                .first?.int("s") ?? 0)
+            let confirmed = daysSeen >= K.observationConfirmThreshold
+
             let existing = try db.query("SELECT * FROM observation WHERE key = ?", [key]).first
             if let existing, let id = existing.int("id") {
                 let wasConfirmed = (existing.int("confirmed") ?? 0) == 1
-                let daysSeen = Int(existing.int("daysSeen") ?? 1) + 1
-                let total = Int(existing.int("totalFrequency") ?? 0) + obs.frequency
-                let confirmed = daysSeen >= K.observationConfirmThreshold
                 try db.execute("""
                     UPDATE observation SET
                         behavior=?, category=?, suggestion=?, evidence=?,
@@ -140,13 +190,16 @@ final class AnalysisStore {
                     }
                 }
             } else {
-                let confirmed = K.observationConfirmThreshold <= 1
                 try db.execute("""
                     INSERT INTO observation
                         (key, behavior, category, suggestion, evidence, daysSeen, totalFrequency, firstSeen, lastSeen, confirmed)
-                    VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """, [key, obs.behavior, obs.category, obs.suggestion, obs.evidence,
-                          obs.frequency, now, now, confirmed ? 1 : 0])
+                          daysSeen, total, now, now, confirmed ? 1 : 0])
+                if confirmed, let row = try db.query("SELECT * FROM observation WHERE key = ?", [key]).first,
+                   let led = ledger(from: row) {
+                    newlyConfirmed.append(led)
+                }
             }
         }
         return newlyConfirmed
@@ -207,10 +260,8 @@ final class AnalysisStore {
     func resolutionsContext() -> String {
         let resolved = allObservations(includeDismissed: true).filter { $0.resolution != nil }
         guard !resolved.isEmpty else { return "(none yet)" }
-        let dayFmt = DateFormatter()
-        dayFmt.dateFormat = "yyyy-MM-dd"
         return resolved.map { o in
-            let day = dayFmt.string(from: Date(timeIntervalSince1970: o.resolutionAt ?? 0))
+            let day = DayLabel.string(from: Date(timeIntervalSince1970: o.resolutionAt ?? 0))
             if o.isAdopted {
                 let status = o.stillRecurring ? "behavior has STILL been seen since" : "no recurrence so far"
                 return "- ADOPTED \(day) (\(status)): \(o.behavior)"
@@ -272,6 +323,15 @@ final class AnalysisStore {
     func questions(day: String) -> [OpenQuestion] {
         ((try? db.query(
             "SELECT * FROM question WHERE day = ? ORDER BY ts", [day])) ?? [])
+            .compactMap(question(from:))
+    }
+
+    /// Every question ever queued, answered or not. Questions are created during analysis
+    /// but a run that fails afterwards leaves them behind with no digest, so anything keyed
+    /// off digests would lose them — and an answered one is the user's own account of what
+    /// they were doing, the highest-signal text in the whole ledger.
+    func allQuestions() -> [OpenQuestion] {
+        ((try? db.query("SELECT * FROM question ORDER BY ts")) ?? [])
             .compactMap(question(from:))
     }
 

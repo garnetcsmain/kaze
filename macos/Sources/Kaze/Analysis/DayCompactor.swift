@@ -4,7 +4,7 @@ import Foundation
 /// can read cheaply. Kaze captures a frame every 2s (~14k+ frames in a workday), so the
 /// key job is collapsing runs of near-identical screens into segments — "text, so it's
 /// basically free" only holds after de-duplication.
-final class DayCompactor {
+final class DayCompactor: @unchecked Sendable { // holds only a Store, which is thread-safe
     private let store: Store
 
     init(store: Store) {
@@ -24,9 +24,7 @@ final class DayCompactor {
         let cal = Calendar.current
         let start = cal.startOfDay(for: date)
         let end = cal.date(byAdding: .day, value: 1, to: start)!
-        let fmt = DateFormatter()
-        fmt.dateFormat = "yyyy-MM-dd"
-        return (start.timeIntervalSince1970, end.timeIntervalSince1970, fmt.string(from: start))
+        return (start.timeIntervalSince1970, end.timeIntervalSince1970, DayLabel.string(from: start))
     }
 
     func compact(for date: Date) throws -> DayData {

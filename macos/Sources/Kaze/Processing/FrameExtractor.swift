@@ -7,8 +7,8 @@ import AVFoundation
 /// video with AVAssetImageGenerator at exactly videoFrameIndex / 30 seconds
 /// (zero tolerance — more precise than the old ffmpeg -ss keyframe seek).
 /// Works with both new HEVC videos and old ffmpeg-encoded H.264 ones.
-final class FrameExtractor {
-    private let cache = NSCache<NSNumber, NSImage>()
+final class FrameExtractor: @unchecked Sendable {
+    private let cache = NSCache<NSNumber, NSImage>() // NSCache is thread-safe
 
     init() {
         cache.countLimit = 100 // parity with the renderer's LRU blob cache
@@ -26,7 +26,9 @@ final class FrameExtractor {
         var result: NSImage?
         if let filename = frame.imgFilename {
             let url = Paths.screenshotsDir.appendingPathComponent(filename)
-            result = NSImage(contentsOf: url)
+            // Callers await this from the main actor, so the decode of a full-resolution
+            // screenshot has to be pushed off it explicitly.
+            result = await Task.detached(priority: .userInitiated) { NSImage(contentsOf: url) }.value
         }
         if result == nil, let videoPath = frame.videoPath, let index = frame.videoFrameIndex {
             result = await extractFromVideo(videoPath: videoPath, frameIndex: index)

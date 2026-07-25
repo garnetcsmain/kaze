@@ -34,12 +34,14 @@ final class OCRService {
                 let url = Paths.screenshotsDir.appendingPathComponent(filename)
                 guard FileManager.default.fileExists(atPath: url.path) else {
                     // Image already gone — record an empty result so cleanup can proceed.
-                    try store.insertRecognition(frameID: frame.id, dataJSON: "[]", text: "")
+                    try store.insertRecognition(frameID: frame.id, dataJSON: nil, text: "")
                     continue
                 }
                 let lines = recognizeText(at: url)
                 let text = lines.map(\.text).joined(separator: "\n")
-                let json = (try? JSONEncoder().encode(lines)).flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
+                let json = K.storeOCRBoundingBoxes
+                    ? (try? JSONEncoder().encode(lines)).flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
+                    : nil
                 try store.insertRecognition(frameID: frame.id, dataJSON: json, text: text)
             }
         } catch {
